@@ -15,6 +15,8 @@
 
 #define K210_FACE_CONTROL_INTERVAL_MS      (10U)
 #define K210_FACE_TARGET_FRESH_TIMEOUT_MS  (120U)
+#define K210_FACE_TARGET_LOST_TIMEOUT_MS   (1000U)
+#define K210_FACE_PREDICTION_MAX_MS        (250U)
 #define K210_FACE_PREDICTION_TIME_S        (0.0f)
 
 #define K210_FACE_SPEED_X_KP               (1.0f)
@@ -765,6 +767,17 @@ static float slew_speed(float current_speed, float target_speed,
     return target_speed;
 }
 
+static float age_to_prediction_time_s(uint32_t target_age_ms)
+{
+    if (target_age_ms <= K210_FACE_TARGET_FRESH_TIMEOUT_MS) {
+        return K210_FACE_PREDICTION_TIME_S;
+    }
+    if (target_age_ms > K210_FACE_PREDICTION_MAX_MS) {
+        target_age_ms = K210_FACE_PREDICTION_MAX_MS;
+    }
+    return (float)target_age_ms * 0.001f;
+}
+
 static int32_t speed_to_signed_step_hz(float speed_hz,
                                        uint32_t min_step_hz,
                                        uint32_t max_step_hz)
@@ -829,6 +842,8 @@ static void service_tracking_control(void)
     float speed_limit_b;
     float accel_a;
     float accel_b;
+    uint32_t target_age_ms;
+    float prediction_time_s;
 
     if (!g_tracking_enabled || !g_target_valid) {
         stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
@@ -841,8 +856,8 @@ static void service_tracking_control(void)
     enable_tracking_motors();
 
     (void)mspm0_get_clock_ms(&now);
-    if (((uint32_t)now - g_target_update_ms) >
-        K210_FACE_TARGET_FRESH_TIMEOUT_MS) {
+    target_age_ms = (uint32_t)now - g_target_update_ms;
+    if (target_age_ms > K210_FACE_TARGET_LOST_TIMEOUT_MS) {
         g_target_valid = false;
         stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
                            &g_command_speed_a_hz, &g_speed_pid_a);
@@ -850,13 +865,14 @@ static void service_tracking_control(void)
                            &g_command_speed_b_hz, &g_speed_pid_b);
         return;
     }
+    prediction_time_s = age_to_prediction_time_s(target_age_ms);
 
     predicted_error_x =
         (int32_t)((float)g_last_error_x +
-                  (g_error_vx * K210_FACE_PREDICTION_TIME_S));
+                  (g_error_vx * prediction_time_s));
     predicted_error_y =
         (int32_t)((float)g_last_error_y +
-                  (g_error_vy * K210_FACE_PREDICTION_TIME_S));
+                  (g_error_vy * prediction_time_s));
     g_predicted_error_x = predicted_error_x;
     g_predicted_error_y = predicted_error_y;
 
