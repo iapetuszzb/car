@@ -1,0 +1,15 @@
+Debug/
+tmp/
+
+*.o
+*.d
+*.map
+*.out
+*.hex
+*.bin
+*.elf
+*.obj
+*.lst
+
+*.log
+*.tmp
