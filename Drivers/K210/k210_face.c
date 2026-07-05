@@ -293,6 +293,9 @@ static bool compact_rx_byte(uint8_t byte)
             g_compact_error_y = g_compact_parse_values[1];
             g_compact_target_valid =
                 (g_compact_parse_values[2] != 0) ? 1U : 0U;
+            if (g_compact_target_valid != 0U) {
+                g_valid_detection_count++;
+            }
             g_compact_frame_pending = true;
         }
         return true;
@@ -992,9 +995,6 @@ static void process_compact_tracking_frame(void)
     }
 
     (void)mspm0_get_clock_ms(&now);
-    if (target_valid) {
-        g_valid_detection_count++;
-    }
     update_tracking_error(error_x, error_y, target_valid, (uint32_t)now);
 }
 
