@@ -13,31 +13,41 @@
 #define K210_FACE_CENTER_Y                 (K210_FACE_IMAGE_H / 2)
 #define K210_FACE_MIN_SCORE_PERMILLE       (600U)
 
-#define K210_FACE_LIMIT_A_STEPS            (900.0f)
-#define K210_FACE_LIMIT_B_STEPS            (180.0f)
 #define K210_FACE_CONTROL_INTERVAL_MS      (10U)
-#define K210_FACE_LOST_COUNT_LIMIT         (100U)
-#define K210_FACE_RETURN_HOME_TICKS        (1000U)
+#define K210_FACE_TARGET_FRESH_TIMEOUT_MS  (120U)
+#define K210_FACE_PREDICTION_TIME_S        (0.0f)
 
-#define K210_FACE_FOLLOW_X_KP              (0.002f)
-#define K210_FACE_FOLLOW_X_KI              (0.0f)
-#define K210_FACE_FOLLOW_X_KD              (0.0f)
-#define K210_FACE_FOLLOW_Y_KP              (-0.002f)
-#define K210_FACE_FOLLOW_Y_KI              (0.0f)
-#define K210_FACE_FOLLOW_Y_KD              (0.0f)
-#define K210_FACE_POSITION_KP              (5.0f)
-#define K210_FACE_POSITION_KI              (1.0f)
-#define K210_FACE_POSITION_KD              (7.0f)
-#define K210_FACE_A_POSITION_SPEED_LIMIT   (8.0f)
-#define K210_FACE_B_POSITION_SPEED_LIMIT   (3.0f)
+#define K210_FACE_SPEED_X_KP               (1.0f)
+#define K210_FACE_SPEED_X_KI               (0.5f)
+#define K210_FACE_SPEED_X_KD               (4.0f)
+#define K210_FACE_SPEED_Y_KP               (-1.0f)
+#define K210_FACE_SPEED_Y_KI               (0.5f)
+#define K210_FACE_SPEED_Y_KD               (-3.0f)
+#define K210_FACE_SPEED_PID_OUT_MAX        (2000.0f)
+#define K210_FACE_SPEED_PID_I_MAX          (80.0f)
+
 #define K210_FACE_A_MIN_STEP_HZ            (80U)
 #define K210_FACE_A_MAX_STEP_HZ            (1800U)
 #define K210_FACE_B_MIN_STEP_HZ            (60U)
 #define K210_FACE_B_MAX_STEP_HZ            (800U)
 #define K210_FACE_CENTER_DEADZONE_X        (8)
 #define K210_FACE_CENTER_DEADZONE_Y        (8)
-#define K210_FACE_A_TARGET_DELTA_LIMIT     (0.45f)
-#define K210_FACE_B_TARGET_DELTA_LIMIT     (0.18f)
+#define K210_FACE_A_ERR_SMALL              (12.0f)
+#define K210_FACE_A_ERR_LARGE              (45.0f)
+#define K210_FACE_B_ERR_SMALL              (10.0f)
+#define K210_FACE_B_ERR_LARGE              (30.0f)
+#define K210_FACE_A_SPEED_LIMIT_SMALL      (220.0f)
+#define K210_FACE_A_SPEED_LIMIT_MID        (800.0f)
+#define K210_FACE_A_SPEED_LIMIT_LARGE      (1600.0f)
+#define K210_FACE_B_SPEED_LIMIT_SMALL      (90.0f)
+#define K210_FACE_B_SPEED_LIMIT_MID        (260.0f)
+#define K210_FACE_B_SPEED_LIMIT_LARGE      (560.0f)
+#define K210_FACE_A_ACCEL_SMALL            (3000.0f)
+#define K210_FACE_A_ACCEL_MID              (4500.0f)
+#define K210_FACE_A_ACCEL_LARGE            (6000.0f)
+#define K210_FACE_B_ACCEL_SMALL            (1000.0f)
+#define K210_FACE_B_ACCEL_MID              (1800.0f)
+#define K210_FACE_B_ACCEL_LARGE            (2600.0f)
 
 /*
  * The WHEELTEC reference PID is kept, but this stepper gimbal's physical
@@ -161,21 +171,17 @@ static volatile int32_t g_last_error_x;
 static volatile int32_t g_last_error_y;
 static volatile uint16_t g_object_center_x;
 static volatile uint16_t g_object_center_y;
-static volatile uint16_t g_object_lost_count;
-static volatile bool g_object_lost;
-
-static uint16_t g_return_home_count;
+static volatile bool g_target_valid;
+static volatile uint32_t g_target_update_ms;
 static uint32_t g_control_elapsed_ms;
-static K210FacePid g_follow_pid_x;
-static K210FacePid g_follow_pid_y;
-static float g_target_a_steps;
-static float g_target_b_steps;
-static float g_position_a_steps;
-static float g_position_b_steps;
-static float g_position_integral_a;
-static float g_position_integral_b;
-static float g_position_last_bias_a;
-static float g_position_last_bias_b;
+static K210FacePid g_speed_pid_a;
+static K210FacePid g_speed_pid_b;
+static float g_error_vx;
+static float g_error_vy;
+static volatile int32_t g_predicted_error_x;
+static volatile int32_t g_predicted_error_y;
+static float g_command_speed_a_hz;
+static float g_command_speed_b_hz;
 
 #if K210_FACE_USE_UART_DMA
 static volatile uint8_t g_dma_rx_buffer[K210_FACE_DMA_RX_BUFFER_LEN];
@@ -212,14 +218,6 @@ static float clamp_f32(float value, float min_value, float max_value)
         return max_value;
     }
     return value;
-}
-
-static int32_t round_f32_to_i32(float value)
-{
-    if (value >= 0.0f) {
-        return (int32_t)(value + 0.5f);
-    }
-    return (int32_t)(value - 0.5f);
 }
 
 static uint8_t next_rx_queue_index(uint8_t index)
@@ -702,229 +700,255 @@ static void track_pid_init(K210FacePid *pid, float kp, float ki, float kd)
     pid->input_ready = false;
 }
 
-static float track_pid_update(K210FacePid *pid, float target, float input)
+static float speed_pid_update(K210FacePid *pid, float error)
 {
-    float error;
     float derivative;
     float output;
 
-    pid->setpoint = target;
-    error = pid->setpoint - input;
     if (pid->input_ready) {
-        derivative = input - pid->last_input;
+        derivative = error - pid->last_error;
     } else {
         derivative = 0.0f;
         pid->input_ready = true;
     }
+
     pid->integral += error;
+    pid->integral = clamp_f32(pid->integral,
+                              -K210_FACE_SPEED_PID_I_MAX,
+                              K210_FACE_SPEED_PID_I_MAX);
 
     output = (pid->kp * error) +
-             (pid->ki * pid->integral) -
+             (pid->ki * pid->integral) +
              (pid->kd * derivative);
+    output = clamp_f32(output,
+                       -K210_FACE_SPEED_PID_OUT_MAX,
+                       K210_FACE_SPEED_PID_OUT_MAX);
 
     pid->last_error = error;
-    pid->last_input = input;
+    pid->last_input = error;
     return output;
 }
 
-static void track_pid_hold(K210FacePid *pid, float input)
+static void speed_pid_reset(K210FacePid *pid)
 {
     pid->integral = 0.0f;
     pid->last_error = 0.0f;
-    pid->last_input = input;
-    pid->input_ready = true;
+    pid->last_input = 0.0f;
+    pid->input_ready = false;
 }
 
-
-static float position_pid_update(float position, float target,
-                                 float *integral_bias,
-                                 float *last_bias)
+static float select_by_error(float abs_error, float small_error,
+                             float large_error, float small_value,
+                             float mid_value, float large_value)
 {
-    float bias;
-    float output;
-
-    bias = target - position;
-    *integral_bias += bias;
-    output = ((K210_FACE_POSITION_KP * bias) / 100.0f) +
-             ((K210_FACE_POSITION_KI * (*integral_bias)) / 100.0f) +
-             ((K210_FACE_POSITION_KD * (bias - *last_bias)) / 100.0f);
-    *last_bias = bias;
-
-    return output;
+    if (abs_error < small_error) {
+        return small_value;
+    }
+    if (abs_error >= large_error) {
+        return large_value;
+    }
+    return mid_value;
 }
 
-static uint32_t velocity_to_step_hz(float velocity_steps,
-                                    uint32_t min_step_hz,
-                                    uint32_t max_step_hz)
+static float slew_speed(float current_speed, float target_speed,
+                        float accel_hz_per_s)
 {
-    float mag;
-    uint32_t step_hz;
+    float max_delta =
+        accel_hz_per_s * ((float)K210_FACE_CONTROL_INTERVAL_MS / 1000.0f);
 
-    mag = abs_f32(velocity_steps);
-    if (mag < 0.2f) {
-        return min_step_hz;
+    if (target_speed > (current_speed + max_delta)) {
+        return current_speed + max_delta;
+    }
+    if (target_speed < (current_speed - max_delta)) {
+        return current_speed - max_delta;
+    }
+    return target_speed;
+}
+
+static int32_t speed_to_signed_step_hz(float speed_hz,
+                                       uint32_t min_step_hz,
+                                       uint32_t max_step_hz)
+{
+    float mag = abs_f32(speed_hz);
+    int32_t signed_step_hz;
+
+    if (mag < 1.0f) {
+        return 0;
+    }
+    if (mag < (float)min_step_hz) {
+        mag = (float)min_step_hz;
+    }
+    if (mag > (float)max_step_hz) {
+        mag = (float)max_step_hz;
     }
 
-    step_hz = (uint32_t)((mag * (1000.0f /
-                       (float)K210_FACE_CONTROL_INTERVAL_MS)) + 0.5f);
-    if (step_hz < min_step_hz) {
-        step_hz = min_step_hz;
-    }
-    if (step_hz > max_step_hz) {
-        step_hz = max_step_hz;
-    }
-    return step_hz;
+    signed_step_hz = (int32_t)(mag + 0.5f);
+    return (speed_hz >= 0.0f) ? signed_step_hz : -signed_step_hz;
 }
 
-static void limit_track_targets(void)
+static void apply_axis_speed(StepperGimbalMotor motor,
+                             float *current_speed_hz,
+                             float target_speed_hz,
+                             float accel_hz_per_s,
+                             uint32_t min_step_hz,
+                             uint32_t max_step_hz)
 {
-    g_target_a_steps = clamp_f32(g_target_a_steps,
-                                 -K210_FACE_LIMIT_A_STEPS,
-                                 K210_FACE_LIMIT_A_STEPS);
-    g_target_b_steps = clamp_f32(g_target_b_steps,
-                                 -K210_FACE_LIMIT_B_STEPS,
-                                 K210_FACE_LIMIT_B_STEPS);
-}
+    int32_t signed_step_hz;
 
-static void apply_axis_position(StepperGimbalMotor motor,
-                                float command_position_steps,
-                                float velocity_steps,
-                                float travel_limit_steps,
-                                uint32_t min_step_hz,
-                                uint32_t max_step_hz)
-{
-    int32_t target_steps;
-    uint32_t step_hz;
+    *current_speed_hz = slew_speed(*current_speed_hz,
+                                   target_speed_hz,
+                                   accel_hz_per_s);
+    signed_step_hz = speed_to_signed_step_hz(*current_speed_hz,
+                                             min_step_hz,
+                                             max_step_hz);
 
-    command_position_steps = clamp_f32(command_position_steps,
-                                       -travel_limit_steps,
-                                       travel_limit_steps);
-    target_steps = round_f32_to_i32(command_position_steps);
-    step_hz = velocity_to_step_hz(velocity_steps, min_step_hz, max_step_hz);
-
-    if (StepperGimbal_MoveToSteps(motor, target_steps, step_hz)) {
+    if (StepperGimbal_SetVelocity(motor, signed_step_hz)) {
         g_track_command_count++;
     }
 }
 
+static void stop_axis_tracking(StepperGimbalMotor motor,
+                               float *current_speed_hz,
+                               K210FacePid *pid)
+{
+    *current_speed_hz = 0.0f;
+    speed_pid_reset(pid);
+    (void)StepperGimbal_SetVelocity(motor, 0);
+}
+
 static void service_tracking_control(void)
 {
-    uint16_t center_x;
-    uint16_t center_y;
-    int32_t error_x;
-    int32_t error_y;
-    float target_delta_a;
-    float target_delta_b;
-    float velocity_a;
-    float velocity_b;
+    unsigned long now;
+    int32_t predicted_error_x;
+    int32_t predicted_error_y;
+    float abs_error_a;
+    float abs_error_b;
+    float speed_a;
+    float speed_b;
+    float speed_limit_a;
+    float speed_limit_b;
+    float accel_a;
+    float accel_b;
 
-    if (!g_tracking_enabled || !g_has_detection) {
+    if (!g_tracking_enabled || !g_target_valid) {
+        stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
+                           &g_command_speed_a_hz, &g_speed_pid_a);
+        stop_axis_tracking(STEPPER_GIMBAL_MOTOR_B,
+                           &g_command_speed_b_hz, &g_speed_pid_b);
         return;
     }
 
     enable_tracking_motors();
 
-    if (g_object_lost_count <= K210_FACE_LOST_COUNT_LIMIT) {
-        g_object_lost_count++;
+    (void)mspm0_get_clock_ms(&now);
+    if (((uint32_t)now - g_target_update_ms) >
+        K210_FACE_TARGET_FRESH_TIMEOUT_MS) {
+        g_target_valid = false;
+        stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
+                           &g_command_speed_a_hz, &g_speed_pid_a);
+        stop_axis_tracking(STEPPER_GIMBAL_MOTOR_B,
+                           &g_command_speed_b_hz, &g_speed_pid_b);
+        return;
     }
-    if (g_object_lost_count > K210_FACE_LOST_COUNT_LIMIT) {
-        g_object_lost_count = K210_FACE_LOST_COUNT_LIMIT + 1U;
-        g_object_lost = true;
-    }
 
-    if (!g_object_lost) {
-        center_x = g_object_center_x;
-        center_y = g_object_center_y;
-        g_return_home_count = 0U;
-        error_x = K210_FACE_CENTER_X - (int32_t)center_x;
-        error_y = K210_FACE_CENTER_Y - (int32_t)center_y;
+    predicted_error_x =
+        (int32_t)((float)g_last_error_x +
+                  (g_error_vx * K210_FACE_PREDICTION_TIME_S));
+    predicted_error_y =
+        (int32_t)((float)g_last_error_y +
+                  (g_error_vy * K210_FACE_PREDICTION_TIME_S));
+    g_predicted_error_x = predicted_error_x;
+    g_predicted_error_y = predicted_error_y;
 
-       if (abs_i32(error_x) > K210_FACE_CENTER_DEADZONE_X) {
-            target_delta_a = K210_FACE_AXIS_A_DIR *
-                track_pid_update(&g_follow_pid_x,
-                    (float)K210_FACE_CENTER_X, (float)center_x);
-            target_delta_a = clamp_f32(target_delta_a,
-                                       -K210_FACE_A_TARGET_DELTA_LIMIT,
-                                       K210_FACE_A_TARGET_DELTA_LIMIT);
-        } else {
-            target_delta_a = 0.0f;
-            g_target_a_steps = g_position_a_steps;
-            g_position_integral_a = 0.0f;
-            g_position_last_bias_a = 0.0f;
-            track_pid_hold(&g_follow_pid_x, (float)center_x);
-        }
+    abs_error_a = abs_f32((float)predicted_error_x);
+    abs_error_b = abs_f32((float)predicted_error_y);
 
-        if (abs_i32(error_y) > K210_FACE_CENTER_DEADZONE_Y) {
-            target_delta_b = K210_FACE_AXIS_B_DIR *
-                track_pid_update(&g_follow_pid_y,
-                    (float)K210_FACE_CENTER_Y, (float)center_y);
-            target_delta_b = clamp_f32(target_delta_b,
-                                       -K210_FACE_B_TARGET_DELTA_LIMIT,
-                                       K210_FACE_B_TARGET_DELTA_LIMIT);
-        } else {
-            target_delta_b = 0.0f;
-            g_target_b_steps = g_position_b_steps;
-            g_position_integral_b = 0.0f;
-            g_position_last_bias_b = 0.0f;
-            track_pid_hold(&g_follow_pid_y, (float)center_y);
-        }
-
-        g_target_a_steps += target_delta_a;
-        g_target_b_steps += target_delta_b;
-
-        g_last_error_x = error_x;
-        g_last_error_y = error_y;
-      
+    if (abs_error_a <= (float)K210_FACE_CENTER_DEADZONE_X) {
+        stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
+                           &g_command_speed_a_hz, &g_speed_pid_a);
     } else {
-        if (g_return_home_count < K210_FACE_RETURN_HOME_TICKS) {
-            g_return_home_count++;
-        } else {
-            g_target_a_steps = 0.0f;
-            g_target_b_steps = 0.0f;
-        }
-  
+        speed_limit_a = select_by_error(abs_error_a,
+            K210_FACE_A_ERR_SMALL, K210_FACE_A_ERR_LARGE,
+            K210_FACE_A_SPEED_LIMIT_SMALL,
+            K210_FACE_A_SPEED_LIMIT_MID,
+            K210_FACE_A_SPEED_LIMIT_LARGE);
+        accel_a = select_by_error(abs_error_a,
+            K210_FACE_A_ERR_SMALL, K210_FACE_A_ERR_LARGE,
+            K210_FACE_A_ACCEL_SMALL,
+            K210_FACE_A_ACCEL_MID,
+            K210_FACE_A_ACCEL_LARGE);
+        speed_a = K210_FACE_AXIS_A_DIR *
+                  speed_pid_update(&g_speed_pid_a,
+                                   (float)predicted_error_x);
+        speed_a = clamp_f32(speed_a, -speed_limit_a, speed_limit_a);
+        apply_axis_speed(STEPPER_GIMBAL_MOTOR_A,
+                         &g_command_speed_a_hz, speed_a, accel_a,
+                         K210_FACE_A_MIN_STEP_HZ,
+                         K210_FACE_A_MAX_STEP_HZ);
     }
 
-    limit_track_targets();
-
-    velocity_a = position_pid_update(g_position_a_steps, g_target_a_steps,
-                                     &g_position_integral_a,
-                                     &g_position_last_bias_a);
-    velocity_b = position_pid_update(g_position_b_steps, g_target_b_steps,
-                                     &g_position_integral_b,
-                                     &g_position_last_bias_b);
-    velocity_a = clamp_f32(velocity_a, -K210_FACE_A_POSITION_SPEED_LIMIT,
-                           K210_FACE_A_POSITION_SPEED_LIMIT);
-    velocity_b = clamp_f32(velocity_b, -K210_FACE_B_POSITION_SPEED_LIMIT,
-                           K210_FACE_B_POSITION_SPEED_LIMIT);
-
-    g_position_a_steps = clamp_f32(g_position_a_steps + velocity_a,
-                                   -K210_FACE_LIMIT_A_STEPS,
-                                   K210_FACE_LIMIT_A_STEPS);
-    g_position_b_steps = clamp_f32(g_position_b_steps + velocity_b,
-                                   -K210_FACE_LIMIT_B_STEPS,
-                                   K210_FACE_LIMIT_B_STEPS);
-
-    apply_axis_position(STEPPER_GIMBAL_MOTOR_A, g_position_a_steps,
-                        velocity_a, K210_FACE_LIMIT_A_STEPS,
-                        K210_FACE_A_MIN_STEP_HZ,
-                        K210_FACE_A_MAX_STEP_HZ);
-    apply_axis_position(STEPPER_GIMBAL_MOTOR_B, g_position_b_steps,
-                        velocity_b, K210_FACE_LIMIT_B_STEPS,
-                        K210_FACE_B_MIN_STEP_HZ,
-                        K210_FACE_B_MAX_STEP_HZ);
+    if (abs_error_b <= (float)K210_FACE_CENTER_DEADZONE_Y) {
+        stop_axis_tracking(STEPPER_GIMBAL_MOTOR_B,
+                           &g_command_speed_b_hz, &g_speed_pid_b);
+    } else {
+        speed_limit_b = select_by_error(abs_error_b,
+            K210_FACE_B_ERR_SMALL, K210_FACE_B_ERR_LARGE,
+            K210_FACE_B_SPEED_LIMIT_SMALL,
+            K210_FACE_B_SPEED_LIMIT_MID,
+            K210_FACE_B_SPEED_LIMIT_LARGE);
+        accel_b = select_by_error(abs_error_b,
+            K210_FACE_B_ERR_SMALL, K210_FACE_B_ERR_LARGE,
+            K210_FACE_B_ACCEL_SMALL,
+            K210_FACE_B_ACCEL_MID,
+            K210_FACE_B_ACCEL_LARGE);
+        speed_b = K210_FACE_AXIS_B_DIR *
+                  speed_pid_update(&g_speed_pid_b,
+                                   (float)predicted_error_y);
+        speed_b = clamp_f32(speed_b, -speed_limit_b, speed_limit_b);
+        apply_axis_speed(STEPPER_GIMBAL_MOTOR_B,
+                         &g_command_speed_b_hz, speed_b, accel_b,
+                         K210_FACE_B_MIN_STEP_HZ,
+                         K210_FACE_B_MAX_STEP_HZ);
+    }
 }
 
 static void update_tracking_target(const K210FaceDetection *detection)
 {
+    int32_t new_error_x;
+    int32_t new_error_y;
+    uint32_t frame_dt_ms;
+    float frame_dt_s;
+
     if (!g_tracking_enabled || !detection->valid) {
         return;
     }
 
     g_object_center_x = detection->center_x;
     g_object_center_y = detection->center_y;
-    g_object_lost_count = 0U;
-    g_object_lost = false;
+    new_error_x = K210_FACE_CENTER_X - (int32_t)detection->center_x;
+    new_error_y = K210_FACE_CENTER_Y - (int32_t)detection->center_y;
+
+    if (g_target_valid) {
+        frame_dt_ms = detection->last_update_ms - g_target_update_ms;
+        if (frame_dt_ms == 0U) {
+            frame_dt_ms = 1U;
+        }
+        frame_dt_s = (float)frame_dt_ms * 0.001f;
+        g_error_vx = ((float)new_error_x - (float)g_last_error_x) /
+                     frame_dt_s;
+        g_error_vy = ((float)new_error_y - (float)g_last_error_y) /
+                     frame_dt_s;
+    } else {
+        g_error_vx = 0.0f;
+        g_error_vy = 0.0f;
+    }
+
+    g_last_error_x = new_error_x;
+    g_last_error_y = new_error_y;
+    g_predicted_error_x = new_error_x;
+    g_predicted_error_y = new_error_y;
+    g_target_update_ms = detection->last_update_ms;
+    g_target_valid = true;
 }
 
 void K210Face_Init(void)
@@ -952,25 +976,19 @@ void K210Face_Init(void)
     g_last_error_y = 0;
     g_object_center_x = K210_FACE_CENTER_X;
     g_object_center_y = K210_FACE_CENTER_Y;
-    g_object_lost_count = K210_FACE_LOST_COUNT_LIMIT + 1U;
-    g_object_lost = true;
-
-    g_return_home_count = 0U;
+    g_target_valid = false;
+    g_target_update_ms = 0U;
     g_control_elapsed_ms = 0U;
-    track_pid_init(&g_follow_pid_x, K210_FACE_FOLLOW_X_KP,
-                   K210_FACE_FOLLOW_X_KI, K210_FACE_FOLLOW_X_KD);
-    track_pid_init(&g_follow_pid_y, K210_FACE_FOLLOW_Y_KP,
-                   K210_FACE_FOLLOW_Y_KI, K210_FACE_FOLLOW_Y_KD);
-    g_target_a_steps =
-        (float)StepperGimbal_GetPositionSteps(STEPPER_GIMBAL_MOTOR_A);
-    g_target_b_steps =
-        (float)StepperGimbal_GetPositionSteps(STEPPER_GIMBAL_MOTOR_B);
-    g_position_a_steps = g_target_a_steps;
-    g_position_b_steps = g_target_b_steps;
-    g_position_integral_a = 0.0f;
-    g_position_integral_b = 0.0f;
-    g_position_last_bias_a = 0.0f;
-    g_position_last_bias_b = 0.0f;
+    track_pid_init(&g_speed_pid_a, K210_FACE_SPEED_X_KP,
+                   K210_FACE_SPEED_X_KI, K210_FACE_SPEED_X_KD);
+    track_pid_init(&g_speed_pid_b, K210_FACE_SPEED_Y_KP,
+                   K210_FACE_SPEED_Y_KI, K210_FACE_SPEED_Y_KD);
+    g_error_vx = 0.0f;
+    g_error_vy = 0.0f;
+    g_predicted_error_x = 0;
+    g_predicted_error_y = 0;
+    g_command_speed_a_hz = 0.0f;
+    g_command_speed_b_hz = 0.0f;
     StepperGimbal_SetHoldAfterMove(true);
     configure_uart_rx();
 }
