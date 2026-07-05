@@ -15,8 +15,6 @@
 
 #define K210_FACE_CONTROL_INTERVAL_MS      (10U)
 #define K210_FACE_TARGET_FRESH_TIMEOUT_MS  (120U)
-#define K210_FACE_TARGET_LOST_TIMEOUT_MS   (100U)
-#define K210_FACE_PREDICTION_MAX_MS        (250U)
 #define K210_FACE_PREDICTION_TIME_S        (0.0f)
 
 #define K210_FACE_SPEED_X_KP               (1.0f)
@@ -71,6 +69,7 @@
 #define K210_FACE_PARSE_LINES_PER_TASK     (16U)
 
 #define K210_FACE_RX_LINE_LEN              (128U)
+#define K210_FACE_COMPACT_MAX_ABS_ERROR    (1000)
 
 /*
  * UART0 on PA10/PA11 is enabled by SysConfig, but the current board only sees
@@ -184,6 +183,16 @@ static volatile int32_t g_predicted_error_x;
 static volatile int32_t g_predicted_error_y;
 static float g_command_speed_a_hz;
 static float g_command_speed_b_hz;
+static volatile bool g_target_frame_pending;
+static volatile uint8_t g_compact_parse_state;
+static volatile int32_t g_compact_parse_values[3];
+static volatile int32_t g_compact_parse_value;
+static volatile int8_t g_compact_parse_sign;
+static volatile bool g_compact_parse_has_digit;
+static volatile int32_t g_compact_error_x;
+static volatile int32_t g_compact_error_y;
+static volatile uint8_t g_compact_target_valid;
+static volatile bool g_compact_frame_pending;
 
 #if K210_FACE_USE_UART_DMA
 static volatile uint8_t g_dma_rx_buffer[K210_FACE_DMA_RX_BUFFER_LEN];
@@ -231,13 +240,97 @@ static uint8_t next_rx_queue_index(uint8_t index)
     return index;
 }
 
+static void compact_parser_start_field(uint8_t field)
+{
+    if (field == 1U) {
+        g_compact_parse_values[0] = 0;
+        g_compact_parse_values[1] = 0;
+        g_compact_parse_values[2] = 0;
+    }
+    g_compact_parse_state = field;
+    g_compact_parse_value = 0;
+    g_compact_parse_sign = 1;
+    g_compact_parse_has_digit = false;
+}
+
+static void compact_parser_finish_field(void)
+{
+    if ((g_compact_parse_state >= 1U) &&
+        (g_compact_parse_state <= 3U) &&
+        g_compact_parse_has_digit) {
+        g_compact_parse_values[g_compact_parse_state - 1U] =
+            g_compact_parse_value * (int32_t)g_compact_parse_sign;
+    }
+}
+
+static bool compact_rx_byte(uint8_t byte)
+{
+    if (byte == 'X') {
+        compact_parser_start_field(1U);
+        return true;
+    }
+    if (g_compact_parse_state == 0U) {
+        return false;
+    }
+    if (byte == 'Y') {
+        compact_parser_finish_field();
+        compact_parser_start_field(2U);
+        return true;
+    }
+    if (byte == 'Z') {
+        compact_parser_finish_field();
+        compact_parser_start_field(3U);
+        return true;
+    }
+    if (byte == 'E') {
+        compact_parser_finish_field();
+        g_compact_parse_state = 0U;
+        if ((abs_i32(g_compact_parse_values[0]) <=
+             K210_FACE_COMPACT_MAX_ABS_ERROR) &&
+            (abs_i32(g_compact_parse_values[1]) <=
+             K210_FACE_COMPACT_MAX_ABS_ERROR)) {
+            g_compact_error_x = g_compact_parse_values[0];
+            g_compact_error_y = g_compact_parse_values[1];
+            g_compact_target_valid =
+                (g_compact_parse_values[2] != 0) ? 1U : 0U;
+            g_compact_frame_pending = true;
+        }
+        return true;
+    }
+
+    if ((byte == '\r') || (byte == '\n')) {
+        g_compact_parse_state = 0U;
+        return true;
+    }
+    if ((byte == '-') && !g_compact_parse_has_digit) {
+        g_compact_parse_sign = -1;
+        return true;
+    }
+    if ((byte >= '0') && (byte <= '9')) {
+        g_compact_parse_value =
+            (g_compact_parse_value * 10) + (int32_t)(byte - '0');
+        g_compact_parse_has_digit = true;
+        if (g_compact_parse_value > K210_FACE_COMPACT_MAX_ABS_ERROR) {
+            g_compact_parse_value = K210_FACE_COMPACT_MAX_ABS_ERROR;
+        }
+        return true;
+    }
+
+    return true;
+}
+
 static void k210_rx_byte(uint8_t byte)
 {
     uint32_t i;
     uint8_t write_index;
+    bool compact_byte;
 
     g_rx_byte_count++;
     g_last_rx_byte = byte;
+    compact_byte = compact_rx_byte(byte);
+    if (compact_byte) {
+        return;
+    }
 
     if ((byte == '\r') || (byte == '\n')) {
         if (g_rx_index == 0U) {
@@ -767,17 +860,6 @@ static float slew_speed(float current_speed, float target_speed,
     return target_speed;
 }
 
-static float age_to_prediction_time_s(uint32_t target_age_ms)
-{
-    if (target_age_ms <= K210_FACE_TARGET_FRESH_TIMEOUT_MS) {
-        return K210_FACE_PREDICTION_TIME_S;
-    }
-    if (target_age_ms > K210_FACE_PREDICTION_MAX_MS) {
-        target_age_ms = K210_FACE_PREDICTION_MAX_MS;
-    }
-    return (float)target_age_ms * 0.001f;
-}
-
 static int32_t speed_to_signed_step_hz(float speed_hz,
                                        uint32_t min_step_hz,
                                        uint32_t max_step_hz)
@@ -829,6 +911,93 @@ static void stop_axis_tracking(StepperGimbalMotor motor,
     (void)StepperGimbal_SetVelocity(motor, 0);
 }
 
+static bool consume_compact_frame(int32_t *error_x,
+                                  int32_t *error_y,
+                                  bool *target_valid)
+{
+    bool has_frame;
+
+    NVIC_DisableIRQ(K210_FACE_UART_IRQN);
+#if K210_FACE_USE_UART_DMA
+    NVIC_DisableIRQ(DMA_INT_IRQn);
+#endif
+    has_frame = g_compact_frame_pending;
+    if (has_frame) {
+        *error_x = g_compact_error_x;
+        *error_y = g_compact_error_y;
+        *target_valid = (g_compact_target_valid != 0U);
+        g_compact_frame_pending = false;
+    }
+#if K210_FACE_USE_UART_DMA
+    NVIC_EnableIRQ(DMA_INT_IRQn);
+#endif
+    NVIC_EnableIRQ(K210_FACE_UART_IRQN);
+
+    return has_frame;
+}
+
+static void update_tracking_error(int32_t new_error_x,
+                                  int32_t new_error_y,
+                                  bool target_valid,
+                                  uint32_t update_ms)
+{
+    uint32_t frame_dt_ms;
+    float frame_dt_s;
+
+    if (!g_tracking_enabled) {
+        return;
+    }
+
+    if (!target_valid) {
+        g_target_valid = false;
+        g_target_frame_pending = false;
+        g_error_vx = 0.0f;
+        g_error_vy = 0.0f;
+        return;
+    }
+
+    if (g_target_valid) {
+        frame_dt_ms = update_ms - g_target_update_ms;
+        if (frame_dt_ms == 0U) {
+            frame_dt_ms = 1U;
+        }
+        frame_dt_s = (float)frame_dt_ms * 0.001f;
+        g_error_vx = ((float)new_error_x - (float)g_last_error_x) /
+                     frame_dt_s;
+        g_error_vy = ((float)new_error_y - (float)g_last_error_y) /
+                     frame_dt_s;
+    } else {
+        g_error_vx = 0.0f;
+        g_error_vy = 0.0f;
+    }
+
+    g_last_error_x = new_error_x;
+    g_last_error_y = new_error_y;
+    g_predicted_error_x = new_error_x;
+    g_predicted_error_y = new_error_y;
+    g_target_update_ms = update_ms;
+    g_target_valid = true;
+    g_target_frame_pending = true;
+}
+
+static void process_compact_tracking_frame(void)
+{
+    int32_t error_x;
+    int32_t error_y;
+    bool target_valid;
+    unsigned long now;
+
+    if (!consume_compact_frame(&error_x, &error_y, &target_valid)) {
+        return;
+    }
+
+    (void)mspm0_get_clock_ms(&now);
+    if (target_valid) {
+        g_valid_detection_count++;
+    }
+    update_tracking_error(error_x, error_y, target_valid, (uint32_t)now);
+}
+
 static void service_tracking_control(void)
 {
     unsigned long now;
@@ -843,7 +1012,6 @@ static void service_tracking_control(void)
     float accel_a;
     float accel_b;
     uint32_t target_age_ms;
-    float prediction_time_s;
 
     if (!g_tracking_enabled || !g_target_valid) {
         stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
@@ -857,22 +1025,28 @@ static void service_tracking_control(void)
 
     (void)mspm0_get_clock_ms(&now);
     target_age_ms = (uint32_t)now - g_target_update_ms;
-    if (target_age_ms > K210_FACE_TARGET_LOST_TIMEOUT_MS) {
+    if (target_age_ms > K210_FACE_TARGET_FRESH_TIMEOUT_MS) {
         g_target_valid = false;
+        g_target_frame_pending = false;
+        g_error_vx = 0.0f;
+        g_error_vy = 0.0f;
         stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
                            &g_command_speed_a_hz, &g_speed_pid_a);
         stop_axis_tracking(STEPPER_GIMBAL_MOTOR_B,
                            &g_command_speed_b_hz, &g_speed_pid_b);
         return;
     }
-    prediction_time_s = age_to_prediction_time_s(target_age_ms);
+    if (!g_target_frame_pending) {
+        return;
+    }
+    g_target_frame_pending = false;
 
     predicted_error_x =
         (int32_t)((float)g_last_error_x +
-                  (g_error_vx * prediction_time_s));
+                  (g_error_vx * K210_FACE_PREDICTION_TIME_S));
     predicted_error_y =
         (int32_t)((float)g_last_error_y +
-                  (g_error_vy * prediction_time_s));
+                  (g_error_vy * K210_FACE_PREDICTION_TIME_S));
     g_predicted_error_x = predicted_error_x;
     g_predicted_error_y = predicted_error_y;
 
@@ -932,8 +1106,6 @@ static void update_tracking_target(const K210FaceDetection *detection)
 {
     int32_t new_error_x;
     int32_t new_error_y;
-    uint32_t frame_dt_ms;
-    float frame_dt_s;
 
     if (!g_tracking_enabled || !detection->valid) {
         return;
@@ -943,28 +1115,8 @@ static void update_tracking_target(const K210FaceDetection *detection)
     g_object_center_y = detection->center_y;
     new_error_x = K210_FACE_CENTER_X - (int32_t)detection->center_x;
     new_error_y = K210_FACE_CENTER_Y - (int32_t)detection->center_y;
-
-    if (g_target_valid) {
-        frame_dt_ms = detection->last_update_ms - g_target_update_ms;
-        if (frame_dt_ms == 0U) {
-            frame_dt_ms = 1U;
-        }
-        frame_dt_s = (float)frame_dt_ms * 0.001f;
-        g_error_vx = ((float)new_error_x - (float)g_last_error_x) /
-                     frame_dt_s;
-        g_error_vy = ((float)new_error_y - (float)g_last_error_y) /
-                     frame_dt_s;
-    } else {
-        g_error_vx = 0.0f;
-        g_error_vy = 0.0f;
-    }
-
-    g_last_error_x = new_error_x;
-    g_last_error_y = new_error_y;
-    g_predicted_error_x = new_error_x;
-    g_predicted_error_y = new_error_y;
-    g_target_update_ms = detection->last_update_ms;
-    g_target_valid = true;
+    update_tracking_error(new_error_x, new_error_y, true,
+                          detection->last_update_ms);
 }
 
 void K210Face_Init(void)
@@ -1005,6 +1157,18 @@ void K210Face_Init(void)
     g_predicted_error_y = 0;
     g_command_speed_a_hz = 0.0f;
     g_command_speed_b_hz = 0.0f;
+    g_target_frame_pending = false;
+    g_compact_parse_state = 0U;
+    g_compact_parse_values[0] = 0;
+    g_compact_parse_values[1] = 0;
+    g_compact_parse_values[2] = 0;
+    g_compact_parse_value = 0;
+    g_compact_parse_sign = 1;
+    g_compact_parse_has_digit = false;
+    g_compact_error_x = 0;
+    g_compact_error_y = 0;
+    g_compact_target_valid = 0U;
+    g_compact_frame_pending = false;
     StepperGimbal_SetHoldAfterMove(true);
     configure_uart_rx();
 }
@@ -1044,6 +1208,7 @@ void K210Face_Task(void)
 
 void K210Face_Tick1ms(void)
 {
+    process_compact_tracking_frame();
     g_control_elapsed_ms++;
     if (g_control_elapsed_ms >= K210_FACE_CONTROL_INTERVAL_MS) {
         g_control_elapsed_ms = 0U;
