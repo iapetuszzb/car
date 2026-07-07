@@ -48,9 +48,9 @@ int main(void)
     pid_init(&pidMotorA, DELTA_PID, 18, 35, 0);
     pid_init(&pidMotorB, DELTA_PID, 18, 35, 0);
 
-    P = 900.0f;
+    P = 1800.0f;
     I = 0;
-    D = 300.0f;
+    D = 600.0f;
     pid_init(&pidLine, POSITION_PID, P, I, D);
 
     DL_GPIO_clearPins(GPIO_LEDS_PORT, GPIO_LEDS_USER_LED_1_PIN);

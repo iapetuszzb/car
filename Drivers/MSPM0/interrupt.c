@@ -19,6 +19,8 @@ extern bool start, turnMark;
 extern float TargetSpeed, TargetLine, basespeed;
 extern pid_t pidMotorA, pidMotorB, pidLine;
 
+#define LINE_START_SPEED_SCALE 0.5f
+
 static void BoardButton_Update(void);
 
 void Interrupt_Init(void)
@@ -121,7 +123,7 @@ static void BoardButton_Update(void)
             PID_Reset(&pidLine);
             turnMark = false;
             turncount = 0;
-            TargetSpeed = basespeed;
+            TargetSpeed = basespeed * LINE_START_SPEED_SCALE;
             start = true;
             DL_GPIO_togglePins(GPIO_RGB_PORT, GPIO_RGB_USER_LED_2_PIN);
         }

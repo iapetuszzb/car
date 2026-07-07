@@ -44,13 +44,27 @@ void PID_Reset(pid_t *pid)
 
 void pid_control_line(float TargetLine, float TargetSpeed)
 {
+    static bool line_was_lost = false;
+    float line_now;
+    bool line_lost;
     int base_pwm;
     int turn_pwm;
     int right_pwm;
     int left_pwm;
 
+    line_now = getLine();
+    line_lost = IR_LineLost();
+
+    if(line_lost) {
+        line_now = TargetLine;
+        if(!line_was_lost) {
+            PID_Reset(&pidLine);
+        }
+    }
+    line_was_lost = line_lost;
+
     pidLine.target = TargetLine;
-    pidLine.now = getLine();
+    pidLine.now = line_now;
     pid_cal(&pidLine);
     PID_Limit(&pidLine);
 

@@ -19,10 +19,10 @@
 
 #define K210_FACE_SPEED_X_KP               (0.02f)
 #define K210_FACE_SPEED_X_KI               (0.0f)
-#define K210_FACE_SPEED_X_KD               (0.01f)
-#define K210_FACE_SPEED_Y_KP               (-0.02f)
+#define K210_FACE_SPEED_X_KD               (0.02f)
+#define K210_FACE_SPEED_Y_KP               (0.02f)
 #define K210_FACE_SPEED_Y_KI               (0.0f)
-#define K210_FACE_SPEED_Y_KD               (-0.01f)
+#define K210_FACE_SPEED_Y_KD               (0.02f)
 #define K210_FACE_SPEED_PID_OUT_MAX        (2000.0f)
 #define K210_FACE_SPEED_PID_I_MAX          (80.0f)
 
@@ -51,11 +51,11 @@
 #define K210_FACE_B_ACCEL_LARGE            (2600.0f)
 
 /*
- * The WHEELTEC reference PID is kept, but this stepper gimbal's physical
- * positive directions are opposite to the reference servo axes.
+ * The pitch axis uses the opposite closed-loop sign from the pan axis. If this
+ * is wrong, targets above/below center are pushed farther away from center.
  */
 #define K210_FACE_AXIS_A_DIR               (-1.0f)
-#define K210_FACE_AXIS_B_DIR               (-1.0f)
+#define K210_FACE_AXIS_B_DIR               (1.0f)
 
 #define K210_FACE_USE_UART_DMA             (1)
 #define K210_FACE_DMA_RX_CH                (0U)
