@@ -17,12 +17,12 @@
 #define K210_FACE_TARGET_FRESH_TIMEOUT_MS  (120U)
 #define K210_FACE_PREDICTION_TIME_S        (0.0f)
 
-#define K210_FACE_SPEED_X_KP               (0.35f)
+#define K210_FACE_SPEED_X_KP               (0.02f)
 #define K210_FACE_SPEED_X_KI               (0.0f)
-#define K210_FACE_SPEED_X_KD               (0.45f)
-#define K210_FACE_SPEED_Y_KP               (-0.35f)
+#define K210_FACE_SPEED_X_KD               (0.01f)
+#define K210_FACE_SPEED_Y_KP               (-0.02f)
 #define K210_FACE_SPEED_Y_KI               (0.0f)
-#define K210_FACE_SPEED_Y_KD               (0.45f)
+#define K210_FACE_SPEED_Y_KD               (-0.01f)
 #define K210_FACE_SPEED_PID_OUT_MAX        (2000.0f)
 #define K210_FACE_SPEED_PID_I_MAX          (80.0f)
 
@@ -30,9 +30,10 @@
 #define K210_FACE_A_MAX_STEP_HZ            (1800U)
 #define K210_FACE_B_MIN_STEP_HZ            (60U)
 #define K210_FACE_B_MAX_STEP_HZ            (800U)
-#define K210_FACE_CENTER_DEADZONE_X        (12)
-#define K210_FACE_CENTER_DEADZONE_Y        (12)
-#define K210_FACE_A_ERR_SMALL              (12.0f)
+#define K210_FACE_SPEED_STOP_EPS_HZ        (1.0f)
+#define K210_FACE_CENTER_DEADZONE_X        (10)
+#define K210_FACE_CENTER_DEADZONE_Y        (10)
+#define K210_FACE_A_ERR_SMALL              (10.0f)
 #define K210_FACE_A_ERR_LARGE              (45.0f)
 #define K210_FACE_B_ERR_SMALL              (10.0f)
 #define K210_FACE_B_ERR_LARGE              (30.0f)
@@ -892,6 +893,14 @@ static void apply_axis_speed(StepperGimbalMotor motor,
                              uint32_t max_step_hz)
 {
     int32_t signed_step_hz;
+
+    if (abs_f32(target_speed_hz) < K210_FACE_SPEED_STOP_EPS_HZ) {
+        *current_speed_hz = 0.0f;
+        if (StepperGimbal_SetVelocity(motor, 0)) {
+            g_track_command_count++;
+        }
+        return;
+    }
 
     *current_speed_hz = slew_speed(*current_speed_hz,
                                    target_speed_hz,
