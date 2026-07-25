@@ -1,6 +1,7 @@
 #include "k210_face.h"
 
 #include "clock.h"
+#include "main.h"
 #include "stepper_gimbal.h"
 #include "ti_msp_dl_config.h"
 
@@ -12,6 +13,7 @@
 #define K210_FACE_CENTER_X                 (K210_FACE_IMAGE_W / 2)
 #define K210_FACE_CENTER_Y                 (K210_FACE_IMAGE_H / 2)
 #define K210_FACE_MIN_SCORE_PERMILLE       (600U)
+#define K210_FACE_GIMBAL_OUTPUT_ENABLE     (APP_ENABLE_STEPPER_GIMBAL)
 
 #define K210_FACE_CONTROL_INTERVAL_MS      (10U)
 #define K210_FACE_TARGET_FRESH_TIMEOUT_MS  (120U)
@@ -110,8 +112,8 @@
 #define K210_FACE_UART_MANUAL_INIT         (0)
 #endif
 
-#define K210_FACE_UART_IBRD_40_MHZ_460800  (5U)
-#define K210_FACE_UART_FBRD_40_MHZ_460800  (27U)
+#define K210_FACE_UART_IBRD_40_MHZ_115200  (21U)
+#define K210_FACE_UART_FBRD_40_MHZ_115200  (45U)
 
 #if K210_FACE_USE_UART_DMA
 #define K210_FACE_UART_RX_INTERRUPTS                                      \
@@ -155,7 +157,7 @@ static volatile uint32_t g_rx_overflow_count;
 
 static K210FaceDetection g_latest_detection;
 static bool g_has_detection;
-static bool g_tracking_enabled = true;
+static bool g_tracking_enabled = false;
 static bool g_motors_enabled;
 static volatile uint32_t g_rx_byte_count;
 static volatile uint32_t g_rx_line_count;
@@ -489,8 +491,8 @@ static void init_selected_uart(void)
     DL_UART_Main_setOversampling(K210_FACE_UART_INST,
                                  DL_UART_OVERSAMPLING_RATE_16X);
     DL_UART_Main_setBaudRateDivisor(K210_FACE_UART_INST,
-        K210_FACE_UART_IBRD_40_MHZ_460800,
-        K210_FACE_UART_FBRD_40_MHZ_460800);
+        K210_FACE_UART_IBRD_40_MHZ_115200,
+        K210_FACE_UART_FBRD_40_MHZ_115200);
 #endif
 }
 
@@ -1022,6 +1024,10 @@ static void service_tracking_control(void)
     float accel_b;
     uint32_t target_age_ms;
 
+#if !K210_FACE_GIMBAL_OUTPUT_ENABLE
+    return;
+#endif
+
     if (!g_tracking_enabled || !g_target_valid) {
         stop_axis_tracking(STEPPER_GIMBAL_MOTOR_A,
                            &g_command_speed_a_hz, &g_speed_pid_a);
@@ -1178,7 +1184,9 @@ void K210Face_Init(void)
     g_compact_error_y = 0;
     g_compact_target_valid = 0U;
     g_compact_frame_pending = false;
+#if K210_FACE_GIMBAL_OUTPUT_ENABLE
     StepperGimbal_SetHoldAfterMove(true);
+#endif
     configure_uart_rx();
 }
 
@@ -1290,7 +1298,12 @@ bool K210Face_IsTxBusy(void)
 
 void K210Face_SetTrackingEnabled(bool enabled)
 {
+#if K210_FACE_GIMBAL_OUTPUT_ENABLE
     g_tracking_enabled = enabled;
+#else
+    (void)enabled;
+    g_tracking_enabled = false;
+#endif
 }
 
 bool K210Face_GetLatest(K210FaceDetection *detection)
@@ -1417,6 +1430,7 @@ static void k210_uart_irq_handler(void)
     }
 }
 
+#if APP_ENABLE_VISION_UART
 #if K210_FACE_USE_UART1_PA9_RX
 void UART1_IRQHandler(void)
 {
@@ -1428,8 +1442,9 @@ void UART0_IRQHandler(void)
     k210_uart_irq_handler();
 }
 #endif
+#endif
 
-#if K210_FACE_USE_UART_DMA
+#if APP_ENABLE_VISION_UART && K210_FACE_USE_UART_DMA
 void DMA_IRQHandler(void)
 {
     for (;;) {

@@ -7,18 +7,56 @@ extern volatile int16_t Speed_A, Speed_B;
 
 #define MAX_DUTY 24000
 #define MIN_DUTY -24000
-#define BASE_SPEED_TO_PWM 1500
+#define BASE_SPEED_TO_PWM 1700
 #define MIN_RUN_PWM 12000
-#define START_BOOST_PWM 12000
+#define START_BOOST_PWM 17000
 #define START_BOOST_TICKS 30
-#define LINE_TURN_PWM_LIMIT 5000
+#define LINE_TURN_PWM_LIMIT 16000
+#define LINE_CURVE_ERROR_THRESHOLD 1.25f
+#define LINE_EXTREME_ERROR_THRESHOLD 2.25f
+#define LINE_CURVE_BASE_PWM 9500
+#define LINE_EXTREME_BASE_PWM 6500
+#define LINE_EXTREME_TURN_BOOST 5000
 
+static uint8_t start_boost_ticks_remaining = 0U;
+static bool corner_turn_active = false;
+static ir_outer_direction_t corner_mark = IR_OUTER_NONE;
 
 static int clamp_int(int value, int min, int max)
 {
     if(value > max) return max;
     if(value < min) return min;
     return value;
+}
+
+static float abs_float(float value)
+{
+    return (value < 0.0f) ? -value : value;
+}
+
+static void apply_corner_turn(float target_speed)
+{
+    int corner_pwm;
+    int right_pwm;
+    int left_pwm;
+
+    /* Use the same PWM as straight running, but reverse the inner wheel. */
+    corner_pwm = (int)(target_speed * BASE_SPEED_TO_PWM);
+    corner_pwm = clamp_int(corner_pwm, MIN_RUN_PWM, MAX_DUTY);
+
+    if(corner_mark == IR_OUTER_LEFT) {
+        right_pwm = corner_pwm;
+        left_pwm = -corner_pwm;
+    } else {
+        right_pwm = -corner_pwm;
+        left_pwm = corner_pwm;
+    }
+
+    Load(right_pwm, left_pwm);
+    pidMotorA.target = right_pwm;
+    pidMotorB.target = left_pwm;
+    pidMotorA.now = Speed_A;
+    pidMotorB.now = Speed_B;
 }
 
 void pid_init(pid_t *pid, uint32_t mode, float p, float i, float d)
@@ -42,26 +80,59 @@ void PID_Reset(pid_t *pid)
     pid->out = 0;
 }
 
+void PID_LineControlReset(void)
+{
+    start_boost_ticks_remaining = START_BOOST_TICKS;
+    corner_turn_active = false;
+    corner_mark = IR_OUTER_NONE;
+}
+
 void pid_control_line(float TargetLine, float TargetSpeed)
 {
-    static bool line_was_lost = false;
     float line_now;
-    bool line_lost;
+    bool raw_line_lost;
+    float line_error_abs;
     int base_pwm;
     int turn_pwm;
     int right_pwm;
     int left_pwm;
+    ir_outer_direction_t outer_direction;
 
     line_now = getLine();
-    line_lost = IR_LineLost();
+    raw_line_lost = IR_LineLost();
 
-    if(line_lost) {
-        line_now = TargetLine;
-        if(!line_was_lost) {
-            PID_Reset(&pidLine);
+    if(corner_turn_active) {
+        if(raw_line_lost) {
+            apply_corner_turn(TargetSpeed);
+            return;
+        }
+
+        /* The first black sample ends the corner turn and resumes line PID. */
+        corner_turn_active = false;
+        corner_mark = IR_OUTER_NONE;
+        PID_Reset(&pidLine);
+    } else {
+        outer_direction = IR_GetOuterDirection();
+        if(outer_direction != IR_OUTER_NONE) {
+            corner_mark = outer_direction;
         }
     }
-    line_was_lost = line_lost;
+
+    /* A marked outer receiver followed by white starts an in-place turn. */
+    if(raw_line_lost) {
+        PID_Reset(&pidLine);
+        if(corner_mark != IR_OUTER_NONE) {
+            corner_turn_active = true;
+            apply_corner_turn(TargetSpeed);
+        } else {
+            Load(0, 0);
+            pidMotorA.target = 0;
+            pidMotorB.target = 0;
+            pidMotorA.now = Speed_A;
+            pidMotorB.now = Speed_B;
+        }
+        return;
+    }
 
     pidLine.target = TargetLine;
     pidLine.now = line_now;
@@ -69,12 +140,39 @@ void pid_control_line(float TargetLine, float TargetSpeed)
     PID_Limit(&pidLine);
 
     base_pwm = (int)(TargetSpeed * BASE_SPEED_TO_PWM);
-    base_pwm = clamp_int(base_pwm, MIN_RUN_PWM, MAX_DUTY - LINE_TURN_PWM_LIMIT);
+    base_pwm = clamp_int(base_pwm, MIN_RUN_PWM, MAX_DUTY);
     turn_pwm = clamp_int((int)pidLine.out, -LINE_TURN_PWM_LIMIT, LINE_TURN_PWM_LIMIT);
+    line_error_abs = abs_float(pidLine.error[0]);
+
+    if(line_error_abs >= LINE_EXTREME_ERROR_THRESHOLD) {
+        if(base_pwm > LINE_EXTREME_BASE_PWM) {
+            base_pwm = LINE_EXTREME_BASE_PWM;
+        }
+        if(turn_pwm > 0) {
+            turn_pwm += LINE_EXTREME_TURN_BOOST;
+        } else if(turn_pwm < 0) {
+            turn_pwm -= LINE_EXTREME_TURN_BOOST;
+        }
+        turn_pwm = clamp_int(turn_pwm,
+                             -LINE_TURN_PWM_LIMIT,
+                             LINE_TURN_PWM_LIMIT);
+    } else if(line_error_abs >= LINE_CURVE_ERROR_THRESHOLD) {
+        if(base_pwm > LINE_CURVE_BASE_PWM) {
+            base_pwm = LINE_CURVE_BASE_PWM;
+        }
+    }
+
+    /* Apply the launch floor after curve-speed limiting so it cannot be lost. */
+    if(start_boost_ticks_remaining > 0U) {
+        if(base_pwm < START_BOOST_PWM) {
+            base_pwm = START_BOOST_PWM;
+        }
+        start_boost_ticks_remaining--;
+    }
 
     /* Motor A is right wheel, motor B is left wheel. */
-    right_pwm = base_pwm + turn_pwm;
-    left_pwm = base_pwm - turn_pwm;
+    right_pwm = clamp_int(base_pwm + turn_pwm, MIN_DUTY, MAX_DUTY);
+    left_pwm = clamp_int(base_pwm - turn_pwm, MIN_DUTY, MAX_DUTY);
     Load(right_pwm, left_pwm);
 
     pidMotorA.target = right_pwm;

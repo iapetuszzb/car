@@ -4,7 +4,9 @@
 extern volatile unsigned long tick_ms;
 
 int mspm0_delay_ms(unsigned long num_ms);
+int mspm0_delay_us(unsigned long num_us);
 int mspm0_get_clock_ms(unsigned long *count);
+int mspm0_get_clock_us(unsigned long *count);
 void SysTick_Init(void);
 
 #endif  /* #ifndef _CLOCK_H_ */

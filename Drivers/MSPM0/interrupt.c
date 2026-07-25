@@ -1,5 +1,6 @@
 #include "interrupt.h"
 #include "ti_msp_dl_config.h"
+#include "main.h"
 
 #include "clock.h"
 #include "encoder.h"
@@ -8,6 +9,7 @@
 #include "IR_Module.h"
 #include "stepper_gimbal.h"
 #include "k210_face.h"
+#include "uart.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -18,9 +20,13 @@ extern uint8_t turncount;
 extern bool start, turnMark;
 extern float TargetSpeed, TargetLine, basespeed;
 extern pid_t pidMotorA, pidMotorB, pidLine;
+extern volatile unsigned long tick_100us;
 
-#define LINE_START_SPEED_SCALE 0.5f
+#define LINE_START_SPEED_SCALE 0.75f
 
+#if APP_ENABLE_SERVO_SWEEP
+extern void Servo_Tick100us(void);
+#endif
 static void BoardButton_Update(void);
 
 void Interrupt_Init(void)
@@ -34,13 +40,21 @@ void SysTick_Handler(void)
 {
     static uint8_t tick_100us_count = 0U;
 
+    tick_100us++;
+#if APP_ENABLE_STEPPER_GIMBAL
     StepperGimbal_Tick100us();
+#endif
+#if APP_ENABLE_SERVO_SWEEP
+    Servo_Tick100us();
+#endif
 
     tick_100us_count++;
     if (tick_100us_count >= 10U) {
         tick_100us_count = 0U;
         tick_ms++;
+#if APP_ENABLE_VISION_UART
         K210Face_Tick1ms();
+#endif
     }
 }
 
@@ -81,9 +95,13 @@ void TIMER_0_INST_IRQHandler(void)
             Speed_A = ReadSpeed(&EncoderCount_A);
             Speed_B = ReadSpeed(&EncoderCount_B);
 
-            BoardButton_Update();
+            if (!Bluetooth_MotionIsActive()) {
+                BoardButton_Update();
+            }
 
-            if(start) {
+            if (Bluetooth_MotionControlTick10ms(Speed_A, Speed_B)) {
+                /* Bluetooth motion owns the motors for this control tick. */
+            } else if(start) {
                 pid_control_line(TargetLine, TargetSpeed);
             } else {
                 Load(0, 0);
@@ -121,6 +139,7 @@ static void BoardButton_Update(void)
             PID_Reset(&pidMotorA);
             PID_Reset(&pidMotorB);
             PID_Reset(&pidLine);
+            PID_LineControlReset();
             turnMark = false;
             turncount = 0;
             TargetSpeed = basespeed * LINE_START_SPEED_SCALE;

@@ -40,6 +40,7 @@ typedef struct
 
 //void pid_control_angle(float TargetAngle, float TargetSpeed, bool enable_angle_control);
 void pid_control_line(float TargetLine, float TargetSpeed);
+void PID_LineControlReset(void);
 void pid_turn_only(void);
 float aWheel_pid_control(pid_t* motor, float target, float feedback);
 

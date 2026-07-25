@@ -3,6 +3,7 @@
 
 #define MAX_PWM 24000
 #define MIN_PWM -24000
+#define MOTOR_B_PWM_PERCENT 90
 
 static int clamp_pwm(int pwm)
 {
@@ -13,7 +14,7 @@ static int clamp_pwm(int pwm)
 
 void Motor_Init(void)
 {
-    DL_TimerG_startCounter(PWM_MOTORA_INST);
+    DL_TimerA_startCounter(PWM_MOTORA_INST);
     DL_TimerG_startCounter(PWM_MOTORB_INST);
 }
 
@@ -28,6 +29,7 @@ int abs(int x)
 void Load(int motoA, int motoB)
 {
     motoA = clamp_pwm(motoA);
+    motoB = (motoB * MOTOR_B_PWM_PERCENT) / 100;
     motoB = clamp_pwm(motoB);
 
     if(motoA < 0) {
@@ -43,14 +45,14 @@ void Load(int motoA, int motoB)
 
     /* Motor B is the left wheel BO1/BO2 output, reversed for this chassis. */
     if(motoB < 0) {
-        DL_TimerA_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C0_IDX);
-        DL_TimerA_setCaptureCompareValue(PWM_MOTORB_INST, abs(motoB), GPIO_PWM_MOTORB_C1_IDX);
+        DL_TimerG_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C0_IDX);
+        DL_TimerG_setCaptureCompareValue(PWM_MOTORB_INST, abs(motoB), GPIO_PWM_MOTORB_C1_IDX);
     } else if(motoB > 0) {
-        DL_TimerA_setCaptureCompareValue(PWM_MOTORB_INST, abs(motoB), GPIO_PWM_MOTORB_C0_IDX);
-        DL_TimerA_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C1_IDX);
+        DL_TimerG_setCaptureCompareValue(PWM_MOTORB_INST, abs(motoB), GPIO_PWM_MOTORB_C0_IDX);
+        DL_TimerG_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C1_IDX);
     } else {
-        DL_TimerA_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C0_IDX);
-        DL_TimerA_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C1_IDX);
+        DL_TimerG_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C0_IDX);
+        DL_TimerG_setCaptureCompareValue(PWM_MOTORB_INST, 0, GPIO_PWM_MOTORB_C1_IDX);
     }
 }
 

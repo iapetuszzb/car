@@ -3,6 +3,12 @@
 #include "clock.h"
 
 #define OLED_COLUMN_OFFSET 2
+#define OLED_I2C_DELAY_CYCLES ((CPUCLK_FREQ / 1000000UL) * 3UL)
+
+static void OLED_I2C_Delay(void)
+{
+    delay_cycles(OLED_I2C_DELAY_CYCLES);
+}
 
 //OLED的显存
 //存放格式如下.
@@ -53,28 +59,33 @@ void I2C_Start(void)
 {
     OLED_SDA_Set();
     OLED_SCL_Set();
-
+    OLED_I2C_Delay();
     OLED_SDA_Clr();
+    OLED_I2C_Delay();
     OLED_SCL_Clr();
+    OLED_I2C_Delay();
 }
 
 //结束信号
 void I2C_Stop(void)
 {
     OLED_SDA_Clr();
+    OLED_I2C_Delay();
     OLED_SCL_Set();
-
+    OLED_I2C_Delay();
     OLED_SDA_Set();
+    OLED_I2C_Delay();
 }
 
 //等待信号响应
 void I2C_WaitAck(void) //测数据信号的电平
 {
     OLED_SDA_Set();
-
+    OLED_I2C_Delay();
     OLED_SCL_Set();
-
+    OLED_I2C_Delay();
     OLED_SCL_Clr();
+    OLED_I2C_Delay();
 }
 
 //写入一个字节
@@ -92,10 +103,11 @@ void Send_Byte(uint8_t dat)
         {
             OLED_SDA_Clr();
         }
-
+        OLED_I2C_Delay();
         OLED_SCL_Set();
-
+        OLED_I2C_Delay();
         OLED_SCL_Clr();
+        OLED_I2C_Delay();
         dat<<=1;
     }
 }
@@ -105,6 +117,9 @@ void Send_Byte(uint8_t dat)
 //mode:数据/命令标志 0,表示命令;1,表示数据;
 void OLED_WR_Byte(uint8_t dat,uint8_t mode)
 {
+    uint32_t timer_irq_enabled = NVIC_GetEnableIRQ(TIMER_0_INST_INT_IRQN);
+
+    NVIC_DisableIRQ(TIMER_0_INST_INT_IRQN);
     I2C_Start();
     Send_Byte(0x78);
     I2C_WaitAck();
@@ -114,6 +129,10 @@ void OLED_WR_Byte(uint8_t dat,uint8_t mode)
     Send_Byte(dat);
     I2C_WaitAck();
     I2C_Stop();
+
+    if(timer_irq_enabled != 0U) {
+        NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
+    }
 }
 
 //坐标设置
@@ -264,8 +283,8 @@ void OLED_Init(void)
     OLED_WR_Byte(0x40,OLED_CMD);//--set start line address  Set Mapping RAM Display Start Line (0x00~0x3F)
     OLED_WR_Byte(0x81,OLED_CMD);//--set contrast control register
     OLED_WR_Byte(0xCF,OLED_CMD); // Set SEG Output Current Brightness
-    OLED_WR_Byte(0xA1,OLED_CMD);//--Set SEG/Column Mapping     0xa0左右反置 0xa1正常
-    OLED_WR_Byte(0xC8,OLED_CMD);//Set COM/Row Scan Direction   0xc0上下反置 0xc8正常
+    OLED_WR_Byte(0xA0,OLED_CMD);//--Set SEG/Column Mapping     0xa0左右反置 0xa1正常
+    OLED_WR_Byte(0xC0,OLED_CMD);//Set COM/Row Scan Direction   0xc0上下反置 0xc8正常
     OLED_WR_Byte(0xA6,OLED_CMD);//--set normal display
     OLED_WR_Byte(0xA8,OLED_CMD);//--set multiplex ratio(1 to 64)
     OLED_WR_Byte(0x3f,OLED_CMD);//--1/64 duty
