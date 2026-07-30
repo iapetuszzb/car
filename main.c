@@ -12,6 +12,7 @@
 #include "mpu6500.h"
 #include "motor.h"
 #include "pid.h"
+#include "encoder.h"
 #include "oled_software_i2c.h"
 #include "stepper_gimbal.h"
 #include "k210_face.h"
@@ -22,6 +23,8 @@
 
 #define STEPPER_GIMBAL_RUN_TEST_ON_BOOT 0
 #define GPIO_TOGGLE_TEST_ENABLED 0
+#define HCSR04_MEASUREMENT_ENABLED 0
+#define USB_ANGLE_UART_INTERVAL_MS          (100UL)
 
 #define HCSR04_TRIG_PORT                    GPIOB
 #define HCSR04_TRIG_PIN                     DL_GPIO_PIN_10
@@ -38,7 +41,8 @@
 #define HCSR04_AB_ALPHA                     (0.45f)
 #define HCSR04_AB_BETA                      (0.08f)
 #define HCSR04_AB_DEFAULT_DT_S              (0.15f)
-#define OLED_UPDATE_INTERVAL_MS             (200UL)
+#define OLED_UPDATE_INTERVAL_MS             (100UL)
+#define OLED_CONFIG_REPAIR_UPDATES          (50U)
 #define OLED_RX_TEXT_LEN                     (46U)
 
 #define GPIO_TEST_PORT                      GPIOB
@@ -66,7 +70,7 @@ float TargetSpeed, TargetLine, basespeed;
 pid_t pidMotorA, pidMotorB, pidLine;
 float P, I, D;
 
-#if !GPIO_TOGGLE_TEST_ENABLED
+#if !GPIO_TOGGLE_TEST_ENABLED && HCSR04_MEASUREMENT_ENABLED
 typedef struct {
     float distance_mm;
     float velocity_mm_s;
@@ -196,7 +200,7 @@ static void Servo_Task(unsigned long now_ms)
     Servo_SetPulseUs((uint32_t)pulse_us);
 }
 
-#if !GPIO_TOGGLE_TEST_ENABLED
+#if !GPIO_TOGGLE_TEST_ENABLED && HCSR04_MEASUREMENT_ENABLED
 static void HCSR04_Init(void)
 {
     DL_GPIO_initDigitalOutput(HCSR04_TRIG_IOMUX);
@@ -329,6 +333,68 @@ static void FormatYaw(char *buffer, uint32_t buffer_len, float value)
                    yaw_int, yaw_frac);
 }
 
+static void FormatOdometer(char *buffer, uint32_t buffer_len,
+                           float distance_mm)
+{
+    uint32_t rounded_mm;
+    uint32_t meters;
+    uint32_t millimeters;
+
+    if(distance_mm < 0.0f) {
+        distance_mm = 0.0f;
+    }
+    rounded_mm = (uint32_t)(distance_mm + 0.5f);
+    meters = rounded_mm / 1000UL;
+    millimeters = rounded_mm % 1000UL;
+    (void)snprintf(buffer, buffer_len, "odo:%lu.%03lum",
+                   (unsigned long)meters,
+                   (unsigned long)millimeters);
+}
+
+static void USB_UART_SendString(const char *text)
+{
+    while(*text != '\0') {
+        DL_UART_Main_transmitDataBlocking(UART_USB_INST, (uint8_t)*text);
+        text++;
+    }
+}
+
+static void FormatAngleValue(char *buffer, uint32_t buffer_len, float value)
+{
+    long milli;
+    long integer;
+    long fraction;
+
+    if(value >= 0.0f) {
+        milli = (long)(value * 1000.0f + 0.5f);
+    } else {
+        milli = (long)(value * 1000.0f - 0.5f);
+    }
+
+    integer = milli / 1000L;
+    fraction = milli % 1000L;
+    if(fraction < 0L) {
+        fraction = -fraction;
+    }
+
+    (void)snprintf(buffer, buffer_len, "%ld.%03ld", integer, fraction);
+}
+
+static void USB_UART_PrintAngles(void)
+{
+    char value[24];
+
+    FormatAngleValue(value, sizeof(value), roll);
+    USB_UART_SendString(value);
+    USB_UART_SendString(",");
+    FormatAngleValue(value, sizeof(value), pitch);
+    USB_UART_SendString(value);
+    USB_UART_SendString(",");
+    FormatAngleValue(value, sizeof(value), yaw);
+    USB_UART_SendString(value);
+    USB_UART_SendString("\r\n");
+}
+
 static void OLED_CopyAsciiLine(char *line, uint32_t line_len,
                                const char *text, uint32_t text_offset,
                                const char *prefix)
@@ -401,7 +467,7 @@ static void OLED_ShowLineIfChanged(uint8_t y, uint8_t cache_index,
     }
 
     if(changed) {
-        OLED_ShowString(0, y, (uint8_t *)padded, 16);
+        OLED_ShowString16(y, padded);
         refresh_age[cache_index] = 0U;
     } else {
         refresh_age[cache_index]++;
@@ -412,34 +478,35 @@ static void OLED_ShowStatus(void)
 {
     char line[20];
     char rx_text[OLED_RX_TEXT_LEN];
-    uint8_t rx_pin_level;
-    uint8_t rx_pull_up_enabled;
+    encoder_odometry_t odometry;
+    static uint8_t config_repair_age;
+
+    config_repair_age++;
+    if(config_repair_age >= OLED_CONFIG_REPAIR_UPDATES) {
+        config_repair_age = 0U;
+        OLED_RefreshConfig();
+    }
 
     FormatYaw(line, sizeof(line), yaw);
     OLED_ShowLineIfChanged(0, 0U, line);
 
+    Encoder_GetOdometry(&odometry);
+    FormatOdometer(line, sizeof(line), odometry.distance_center_mm);
+    OLED_ShowLineIfChanged(2, 1U, line);
+
+    (void)snprintf(line, sizeof(line), "A:%05lu B:%05lu",
+                   (unsigned long)(odometry.travel_counts_a % 100000UL),
+                   (unsigned long)(odometry.travel_counts_b % 100000UL));
+    OLED_ShowLineIfChanged(4, 2U, line);
+
     Bluetooth_GetRecentAscii(rx_text, sizeof(rx_text));
     if (rx_text[0] == '\0') {
-        rx_pin_level =
-            (DL_GPIO_readPins(GPIO_UART_0_RX_PORT, GPIO_UART_0_RX_PIN) &
-             GPIO_UART_0_RX_PIN) ? 1U : 0U;
-        rx_pull_up_enabled =
-            (IOMUX->SECCFG.PINCM[GPIO_UART_0_IOMUX_RX] &
-             IOMUX_PINCM_PIPU_MASK) ? 1U : 0U;
-        (void)snprintf(line, sizeof(line), "R:%03lu E:%02lu L%u U%u",
-                       (unsigned long)(Bluetooth_GetRxByteCount() % 1000UL),
-                       (unsigned long)(Bluetooth_GetRxErrorCount() % 100UL),
-                       (unsigned int)rx_pin_level,
-                       (unsigned int)rx_pull_up_enabled);
-        OLED_ShowLineIfChanged(2, 1U, line);
-        OLED_ShowLineIfChanged(4, 2U, "");
-        OLED_ShowLineIfChanged(6, 3U, "");
+        (void)snprintf(line, sizeof(line), "CPR:%lu X%lu",
+                       (unsigned long)ENCODER_COUNTS_PER_WHEEL_REV,
+                       (unsigned long)ENCODER_DECODE_MULTIPLIER);
+        OLED_ShowLineIfChanged(6, 3U, line);
     } else {
         OLED_CopyAsciiLine(line, sizeof(line), rx_text, 0U, "RX:");
-        OLED_ShowLineIfChanged(2, 1U, line);
-        OLED_CopyAsciiLine(line, sizeof(line), rx_text, 13U, NULL);
-        OLED_ShowLineIfChanged(4, 2U, line);
-        OLED_CopyAsciiLine(line, sizeof(line), rx_text, 29U, NULL);
         OLED_ShowLineIfChanged(6, 3U, line);
     }
 }
@@ -509,8 +576,11 @@ static void OLED_ShowToggleStatus(uint8_t pb10_state, uint8_t pb11_state)
 int main(void)
 {
     static unsigned long last_mpu_update_ms = 0UL;
+#if HCSR04_MEASUREMENT_ENABLED
     static unsigned long last_hcsr04_ms = 0UL;
+#endif
     static unsigned long last_oled_update_ms = 0UL;
+    static unsigned long last_usb_angle_uart_ms = 0UL;
     uint8_t mpu_init_status;
 
     SYSCFG_DL_init();
@@ -518,6 +588,7 @@ int main(void)
 
     OLED_Init();
     Motor_Init();
+    Encoder_OdometryReset();
     Load(0, 0);
     OLED_ShowLineIfChanged(0, 0U, "BOOT RESET OK");
     OLED_ShowLineIfChanged(2, 1U, "MPU CAL WAIT");
@@ -525,7 +596,7 @@ int main(void)
     OLED_ShowLineIfChanged(6, 3U, "");
 #if GPIO_TOGGLE_TEST_ENABLED
     GPIO_ToggleTest_Init();
-#else
+#elif HCSR04_MEASUREMENT_ENABLED
     HCSR04_Init();
 #endif
     mpu_init_status = MPU6500_Init();
@@ -590,6 +661,12 @@ int main(void)
 #endif
         Bluetooth_Task();
 
+        if((unsigned long)(now_ms - last_usb_angle_uart_ms) >=
+           USB_ANGLE_UART_INTERVAL_MS) {
+            last_usb_angle_uart_ms = now_ms;
+            USB_UART_PrintAngles();
+        }
+
 #if GPIO_TOGGLE_TEST_ENABLED
         {
             static unsigned long last_oled_update_ms = 0UL;
@@ -603,6 +680,7 @@ int main(void)
             }
         }
 #else
+#if HCSR04_MEASUREMENT_ENABLED
         if ((unsigned long)(now_ms - last_hcsr04_ms) >=
             HCSR04_MEASURE_INTERVAL_MS) {
             bool ok;
@@ -614,6 +692,7 @@ int main(void)
                 distance_mm = HCSR04_FilterDistanceMm(distance_mm, now_ms);
             }
         }
+#endif
 
         if ((unsigned long)(now_ms - last_oled_update_ms) >=
             OLED_UPDATE_INTERVAL_MS) {

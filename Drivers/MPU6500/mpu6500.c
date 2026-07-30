@@ -415,8 +415,11 @@ static void mpu6500_update_attitude(unsigned long now_ms)
     }
 
     dt_s = (float)(now_ms - mpu6500_last_ms) / 1000.0f;
-    if (dt_s <= 0.0f || dt_s > 0.1f) {
-        dt_s = 0.01f;
+    if (dt_s <= 0.0f) {
+        return;
+    }
+    if (dt_s > 0.25f) {
+        dt_s = 0.25f;
     }
     mpu6500_last_ms = now_ms;
 
@@ -463,6 +466,12 @@ static void mpu6500_update_attitude(unsigned long now_ms)
 #endif
 
     mpu6500_yaw_rate_dps = gz_corr;
+
+    /* A 6-axis IMU has no absolute yaw reference. Integrate the calibrated
+     * Z gyro directly for chassis heading; accelerometer fusion is retained
+     * below for roll and pitch only. */
+    yaw = mpu6500_wrap_angle_deg(yaw + (gz_corr * dt_s));
+
     mpu6500_mahony_update(gx_corr, gy_corr, gz_corr,
                           ax_g, ay_g, az_g, dt_s);
     mpu6500_update_euler_from_quat();
@@ -580,10 +589,8 @@ static void mpu6500_update_euler_from_quat(void)
         pitch = asinf(sinp) * MPU6500_RAD_TO_DEG;
     }
 
-    yaw = mpu6500_wrap_angle_deg(
-        atan2f(2.0f * ((q0 * q3) + (q1 * q2)),
-               1.0f - (2.0f * ((q2 * q2) + (q3 * q3)))) *
-        MPU6500_RAD_TO_DEG);
+    /* Yaw is maintained by direct Z-gyro integration in
+     * mpu6500_update_attitude(). */
 }
 
 static int16_t mpu6500_to_int16(uint8_t high, uint8_t low)

@@ -23,11 +23,13 @@ extern pid_t pidMotorA, pidMotorB, pidLine;
 extern volatile unsigned long tick_100us;
 
 #define LINE_START_SPEED_SCALE 0.75f
+#define LINE_SPEED_RAMP_PER_TICK 0.04f
 
 #if APP_ENABLE_SERVO_SWEEP
 extern void Servo_Tick100us(void);
 #endif
 static void BoardButton_Update(void);
+static void LineSpeed_Update(void);
 
 void Interrupt_Init(void)
 {
@@ -94,6 +96,7 @@ void TIMER_0_INST_IRQHandler(void)
         case DL_TIMER_IIDX_ZERO:
             Speed_A = ReadSpeed(&EncoderCount_A);
             Speed_B = ReadSpeed(&EncoderCount_B);
+            Encoder_OdometryUpdate(Speed_A, Speed_B);
 
             if (!Bluetooth_MotionIsActive()) {
                 BoardButton_Update();
@@ -102,6 +105,7 @@ void TIMER_0_INST_IRQHandler(void)
             if (Bluetooth_MotionControlTick10ms(Speed_A, Speed_B)) {
                 /* Bluetooth motion owns the motors for this control tick. */
             } else if(start) {
+                LineSpeed_Update();
                 pid_control_line(TargetLine, TargetSpeed);
             } else {
                 Load(0, 0);
@@ -110,6 +114,18 @@ void TIMER_0_INST_IRQHandler(void)
 
         default:
             break;
+    }
+}
+
+static void LineSpeed_Update(void)
+{
+    if(TargetSpeed < basespeed) {
+        TargetSpeed += LINE_SPEED_RAMP_PER_TICK;
+        if(TargetSpeed > basespeed) {
+            TargetSpeed = basespeed;
+        }
+    } else if(TargetSpeed > basespeed) {
+        TargetSpeed = basespeed;
     }
 }
 

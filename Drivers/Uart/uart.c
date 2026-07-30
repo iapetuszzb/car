@@ -5,6 +5,7 @@
 #if ENABLE_BLUETOOTH
 
 #include "clock.h"
+#include "encoder.h"
 #include "k210_face.h"
 #include "mpu6500.h"
 #include "motor.h"
@@ -45,14 +46,7 @@
 #define BT_HEARTBEAT_INTERVAL_MS           (1000UL)
 #define BT_COMMAND_IDLE_FLUSH_MS           (40UL)
 
-/* The current GPIO decoder counts one falling edge of encoder phase A.
- * For a 13-line encoder and 30:1 gearbox this is 13 * 30 = 390 counts/rev.
- * The STM32 reference uses quadrature x4 and therefore uses 1560 instead. */
-#define BT_ENCODER_PPR                     (390.0f)
-#define BT_WHEEL_DIAMETER_MM               (65.0f)
-#define BT_WHEEL_CIRCUMFERENCE_MM          (204.2035f)
-#define BT_ENCODER_PULSES_PER_MM           \
-    (BT_ENCODER_PPR / BT_WHEEL_CIRCUMFERENCE_MM)
+#define BT_ENCODER_PULSES_PER_MM           (ENCODER_COUNTS_PER_MM)
 
 #define BT_FORWARD_MIN_DISTANCE_M          (0.02f)
 #define BT_FORWARD_MAX_DISTANCE_M          (10.0f)
@@ -83,10 +77,11 @@
 
 #define BT_SPEED_PI_KP                     (700.0f)
 #define BT_SPEED_PI_KI                     (80.0f)
-#define BT_SPEED_PI_INTEGRAL_LIMIT         (5000.0f)
+#define BT_SPEED_PI_INTEGRAL_LIMIT         (12000.0f)
 #define BT_SPEED_MIN_PWM                   (10500.0f)
 #define BT_SPEED_FF_PWM_PER_PULSE          (900.0f)
-#define BT_SPEED_MAX_PWM                   (22000.0f)
+#define BT_SPEED_STALL_BOOST_PWM           (6000.0f)
+#define BT_SPEED_MAX_PWM                   (30000.0f)
 
 typedef enum {
     BT_MOTION_IDLE = 0,
@@ -268,6 +263,9 @@ static int bt_speed_pi_update(float target, int16_t raw_delta,
         (BT_SPEED_MIN_PWM +
          BT_SPEED_FF_PWM_PER_PULSE * bt_abs_float(target));
     output = feedforward + BT_SPEED_PI_KP * error + *integral;
+    if(raw_delta == 0) {
+        output += sign * BT_SPEED_STALL_BOOST_PWM;
+    }
     output = bt_clamp_float(output, -BT_SPEED_MAX_PWM, BT_SPEED_MAX_PWM);
 
     if ((sign > 0.0f) && (output < 0.0f)) {

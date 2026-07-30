@@ -5,17 +5,18 @@
 extern pid_t pidMotorA, pidMotorB, pidLine;
 extern volatile int16_t Speed_A, Speed_B;
 
-#define MAX_DUTY 24000
-#define MIN_DUTY -24000
-#define BASE_SPEED_TO_PWM 1700
+#define MAX_DUTY 32000
+#define MIN_DUTY -32000
+#define BASE_SPEED_TO_PWM 1500
 #define MIN_RUN_PWM 12000
-#define START_BOOST_PWM 17000
-#define START_BOOST_TICKS 30
-#define LINE_TURN_PWM_LIMIT 16000
+#define START_BOOST_PWM 18000
+#define START_BOOST_TICKS 40
+#define LINE_STALL_BOOST_PWM 6000
+#define LINE_TURN_PWM_LIMIT 18000
 #define LINE_CURVE_ERROR_THRESHOLD 1.25f
 #define LINE_EXTREME_ERROR_THRESHOLD 2.25f
-#define LINE_CURVE_BASE_PWM 9500
-#define LINE_EXTREME_BASE_PWM 6500
+#define LINE_CURVE_BASE_PWM 13000
+#define LINE_EXTREME_BASE_PWM 10500
 #define LINE_EXTREME_TURN_BOOST 5000
 
 static uint8_t start_boost_ticks_remaining = 0U;
@@ -32,6 +33,20 @@ static int clamp_int(int value, int min, int max)
 static float abs_float(float value)
 {
     return (value < 0.0f) ? -value : value;
+}
+
+static int apply_stall_torque(int pwm, int16_t encoder_delta)
+{
+    if((pwm == 0) || (encoder_delta != 0)) {
+        return pwm;
+    }
+
+    if(pwm > 0) {
+        pwm += LINE_STALL_BOOST_PWM;
+    } else {
+        pwm -= LINE_STALL_BOOST_PWM;
+    }
+    return clamp_int(pwm, MIN_DUTY, MAX_DUTY);
 }
 
 static void apply_corner_turn(float target_speed)
@@ -52,6 +67,8 @@ static void apply_corner_turn(float target_speed)
         left_pwm = corner_pwm;
     }
 
+    right_pwm = apply_stall_torque(right_pwm, Speed_A);
+    left_pwm = apply_stall_torque(left_pwm, Speed_B);
     Load(right_pwm, left_pwm);
     pidMotorA.target = right_pwm;
     pidMotorB.target = left_pwm;
@@ -173,6 +190,8 @@ void pid_control_line(float TargetLine, float TargetSpeed)
     /* Motor A is right wheel, motor B is left wheel. */
     right_pwm = clamp_int(base_pwm + turn_pwm, MIN_DUTY, MAX_DUTY);
     left_pwm = clamp_int(base_pwm - turn_pwm, MIN_DUTY, MAX_DUTY);
+    right_pwm = apply_stall_torque(right_pwm, Speed_A);
+    left_pwm = apply_stall_torque(left_pwm, Speed_B);
     Load(right_pwm, left_pwm);
 
     pidMotorA.target = right_pwm;

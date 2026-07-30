@@ -1,9 +1,11 @@
 #include "motor.h"
 #include "ti_msp_dl_config.h"
 
-#define MAX_PWM 24000
-#define MIN_PWM -24000
+#define MAX_PWM 32000
+#define MIN_PWM -32000
 #define MOTOR_B_PWM_PERCENT 90
+#define MOTOR_A_DIRECTION_SIGN (1)
+#define MOTOR_B_DIRECTION_SIGN (1)
 
 static int clamp_pwm(int pwm)
 {
@@ -28,6 +30,10 @@ int abs(int x)
 
 void Load(int motoA, int motoB)
 {
+    /* Apply optional per-wheel polarity while keeping positive as forward. */
+    motoA *= MOTOR_A_DIRECTION_SIGN;
+    motoB *= MOTOR_B_DIRECTION_SIGN;
+
     motoA = clamp_pwm(motoA);
     motoB = (motoB * MOTOR_B_PWM_PERCENT) / 100;
     motoB = clamp_pwm(motoB);

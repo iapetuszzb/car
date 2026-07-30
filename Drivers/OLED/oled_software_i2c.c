@@ -1,9 +1,10 @@
 #include "oled_software_i2c.h"
 #include "oledfont.h"
 #include "clock.h"
+#include <stdbool.h>
 
 #define OLED_COLUMN_OFFSET 2
-#define OLED_I2C_DELAY_CYCLES ((CPUCLK_FREQ / 1000000UL) * 3UL)
+#define OLED_I2C_DELAY_CYCLES (CPUCLK_FREQ / 1000000UL)
 
 static void OLED_I2C_Delay(void)
 {
@@ -112,6 +113,23 @@ void Send_Byte(uint8_t dat)
     }
 }
 
+static void OLED_WriteBuffer(uint8_t control, const uint8_t *data,
+                             uint16_t length)
+{
+    uint16_t i;
+
+    I2C_Start();
+    Send_Byte(0x78);
+    I2C_WaitAck();
+    Send_Byte(control);
+    I2C_WaitAck();
+    for(i = 0U; i < length; i++) {
+        Send_Byte(data[i]);
+        I2C_WaitAck();
+    }
+    I2C_Stop();
+}
+
 //发送一个字节
 //向SSD1306写入一个字节。
 //mode:数据/命令标志 0,表示命令;1,表示数据;
@@ -181,6 +199,7 @@ void OLED_ShowChar(uint8_t x,uint8_t y,uint8_t chr,uint8_t sizey)
 {      	
     uint8_t c=0,sizex=sizey/2;
     uint16_t i=0,size1;
+    if((chr < ' ') || (chr > '~')) chr = '?';
     if(sizey==8)size1=6;
     else size1=(sizey/8+((sizey%8)?1:0))*(sizey/2);
     c=chr-' ';//得到偏移后的值
@@ -238,6 +257,60 @@ void OLED_ShowString(uint8_t x,uint8_t y,uint8_t *chr,uint8_t sizey)
         if(sizey==8)x+=6;
         else x+=sizey/2;
     }
+}
+
+void OLED_ShowString16(uint8_t y, const char *text)
+{
+    uint8_t page;
+    uint8_t char_index;
+    uint8_t column;
+    uint8_t character;
+    uint8_t font_index;
+    uint8_t commands[3];
+    static uint8_t page_data[128];
+    bool text_ended;
+
+    if(text == NULL) {
+        return;
+    }
+
+    for(page = 0U; page < 2U; page++) {
+        text_ended = false;
+        for(char_index = 0U; char_index < 16U; char_index++) {
+            if(text_ended) {
+                character = ' ';
+            } else {
+                character = (uint8_t)text[char_index];
+                if(character == '\0') {
+                    text_ended = true;
+                    character = ' ';
+                } else if((character < ' ') || (character > '~')) {
+                    character = '?';
+                }
+            }
+            font_index = (uint8_t)(character - ' ');
+            for(column = 0U; column < 8U; column++) {
+                page_data[(uint16_t)char_index * 8U + column] =
+                    asc2_1608[font_index][(uint16_t)page * 8U + column];
+            }
+        }
+
+        commands[0] = (uint8_t)(0xB0U + y + page);
+        commands[1] = (uint8_t)(0x10U |
+            ((OLED_COLUMN_OFFSET & 0xF0U) >> 4U));
+        commands[2] = (uint8_t)(OLED_COLUMN_OFFSET & 0x0FU);
+        OLED_WriteBuffer(0x00U, commands, 3U);
+        OLED_WriteBuffer(0x40U, page_data, sizeof(page_data));
+    }
+}
+
+void OLED_RefreshConfig(void)
+{
+    static const uint8_t commands[] = {
+        0xA0U, 0xC0U, 0xA6U, 0x20U, 0x02U, 0xAFU
+    };
+
+    OLED_WriteBuffer(0x00U, commands, sizeof(commands));
 }
 
 //显示汉字
