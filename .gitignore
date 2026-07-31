@@ -1,5 +1,12 @@
 Debug/
 tmp/
+.codex_doc_review/
+.codex_hw_review/
+
+**/.pio/
+**/.build-*/
+**/__pycache__/
+**/*.pyc
 
 *.o
 *.d
