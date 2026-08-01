@@ -430,12 +430,31 @@ static void OLED_CopyAsciiLine(char *line, uint32_t line_len,
     line[16] = '\0';
 }
 
+static char oled_line_cache[4][17];
+static uint8_t oled_line_refresh_age[4];
+static uint8_t oled_line_displayed_length[4];
+static bool oled_line_cache_valid[4];
+
+static void OLED_ResetStatusPage(void)
+{
+    uint8_t i;
+
+    for(i = 0U; i < 4U; i++) {
+        oled_line_cache[i][0] = '\0';
+        oled_line_refresh_age[i] = 0U;
+        oled_line_displayed_length[i] = 0U;
+        oled_line_cache_valid[i] = false;
+    }
+
+    OLED_ClearLine16(0U);
+    OLED_ClearLine16(2U);
+    OLED_ClearLine16(4U);
+    OLED_ClearLine16(6U);
+}
+
 static void OLED_ShowLineIfChanged(uint8_t y, uint8_t cache_index,
                                    const char *text)
 {
-    static char line_cache[4][17];
-    static uint8_t refresh_age[4];
-    static uint8_t displayed_length[4];
     char padded[17];
     uint8_t i;
     uint8_t text_length = 0U;
@@ -461,27 +480,32 @@ static void OLED_ShowLineIfChanged(uint8_t y, uint8_t cache_index,
     }
     padded[16] = '\0';
 
+    if(!oled_line_cache_valid[cache_index]) {
+        changed = true;
+    }
+
     for(i = 0U; i < 17U; i++) {
-        if(line_cache[cache_index][i] != padded[i]) {
+        if(oled_line_cache[cache_index][i] != padded[i]) {
             changed = true;
         }
-        line_cache[cache_index][i] = padded[i];
+        oled_line_cache[cache_index][i] = padded[i];
     }
 
     /* Periodically repair a line if an earlier software-I2C write was noisy. */
-    if(refresh_age[cache_index] >= OLED_LINE_REPAIR_UPDATES) {
+    if(oled_line_refresh_age[cache_index] >= OLED_LINE_REPAIR_UPDATES) {
         changed = true;
     }
 
     if(changed) {
-        if(text_length < displayed_length[cache_index]) {
+        if(text_length < oled_line_displayed_length[cache_index]) {
             OLED_ClearLine16(y);
         }
         OLED_ShowString16(y, padded);
-        displayed_length[cache_index] = text_length;
-        refresh_age[cache_index] = 0U;
+        oled_line_displayed_length[cache_index] = text_length;
+        oled_line_refresh_age[cache_index] = 0U;
+        oled_line_cache_valid[cache_index] = true;
     } else {
-        refresh_age[cache_index]++;
+        oled_line_refresh_age[cache_index]++;
     }
 }
 
@@ -660,6 +684,10 @@ int main(void)
     TargetLine = 4.5f;
     Circle_Count = 1;
     turncount = 0;
+
+    OLED_ResetStatusPage();
+    OLED_ShowStatus();
+    last_oled_update_ms = tick_ms;
 
     while (1) {
         unsigned long now_ms = 0UL;
