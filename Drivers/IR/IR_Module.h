@@ -15,6 +15,7 @@ float angle_wrap(float angle);
 float angle_diff(float target, float current);
 float getLine(void);
 bool IR_LineLost(void);
+uint8_t IR_GetBlackCount(void);
 ir_outer_direction_t IR_GetOuterDirection(void);
 void diffControl(void);
 

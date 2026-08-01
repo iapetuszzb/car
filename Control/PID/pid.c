@@ -8,20 +8,23 @@ extern volatile int16_t Speed_A, Speed_B;
 #define MAX_DUTY 32000
 #define MIN_DUTY -32000
 #define BASE_SPEED_TO_PWM 1500
-#define MIN_RUN_PWM 12000
-#define START_BOOST_PWM 18000
-#define START_BOOST_TICKS 40
-#define LINE_STALL_BOOST_PWM 6000
 #define LINE_TURN_PWM_LIMIT 18000
-#define LINE_CURVE_ERROR_THRESHOLD 1.25f
 #define LINE_EXTREME_ERROR_THRESHOLD 2.25f
-#define LINE_CURVE_BASE_PWM 13000
-#define LINE_EXTREME_BASE_PWM 10500
 #define LINE_EXTREME_TURN_BOOST 5000
+#define LINE_STOP_BLACK_COUNT 5U
+#define LINE_STOP_CONFIRM_TICKS 2U
+#define LINE_STOP_RAMP_PWM_PER_TICK 2500
 
-static uint8_t start_boost_ticks_remaining = 0U;
 static bool corner_turn_active = false;
 static ir_outer_direction_t corner_mark = IR_OUTER_NONE;
+static bool line_stop_armed = false;
+static bool line_stop_active = false;
+static bool line_stop_complete = false;
+static uint8_t line_stop_confirm_ticks = 0U;
+static int last_right_pwm = 0;
+static int last_left_pwm = 0;
+static int stop_right_pwm = 0;
+static int stop_left_pwm = 0;
 
 static int clamp_int(int value, int min, int max)
 {
@@ -35,18 +38,29 @@ static float abs_float(float value)
     return (value < 0.0f) ? -value : value;
 }
 
-static int apply_stall_torque(int pwm, int16_t encoder_delta)
+static int ramp_pwm_toward_zero(int pwm)
 {
-    if((pwm == 0) || (encoder_delta != 0)) {
-        return pwm;
+    if(pwm > LINE_STOP_RAMP_PWM_PER_TICK) {
+        return pwm - LINE_STOP_RAMP_PWM_PER_TICK;
     }
+    if(pwm < -LINE_STOP_RAMP_PWM_PER_TICK) {
+        return pwm + LINE_STOP_RAMP_PWM_PER_TICK;
+    }
+    return 0;
+}
 
-    if(pwm > 0) {
-        pwm += LINE_STALL_BOOST_PWM;
-    } else {
-        pwm -= LINE_STALL_BOOST_PWM;
-    }
-    return clamp_int(pwm, MIN_DUTY, MAX_DUTY);
+static void command_line_motors(int right_pwm, int left_pwm)
+{
+    right_pwm = clamp_int(right_pwm, MIN_DUTY, MAX_DUTY);
+    left_pwm = clamp_int(left_pwm, MIN_DUTY, MAX_DUTY);
+    Load(right_pwm, left_pwm);
+
+    last_right_pwm = right_pwm;
+    last_left_pwm = left_pwm;
+    pidMotorA.target = right_pwm;
+    pidMotorB.target = left_pwm;
+    pidMotorA.now = Speed_A;
+    pidMotorB.now = Speed_B;
 }
 
 static void apply_corner_turn(float target_speed)
@@ -57,7 +71,7 @@ static void apply_corner_turn(float target_speed)
 
     /* Use the same PWM as straight running, but reverse the inner wheel. */
     corner_pwm = (int)(target_speed * BASE_SPEED_TO_PWM);
-    corner_pwm = clamp_int(corner_pwm, MIN_RUN_PWM, MAX_DUTY);
+    corner_pwm = clamp_int(corner_pwm, 0, MAX_DUTY);
 
     if(corner_mark == IR_OUTER_LEFT) {
         right_pwm = corner_pwm;
@@ -67,13 +81,7 @@ static void apply_corner_turn(float target_speed)
         left_pwm = corner_pwm;
     }
 
-    right_pwm = apply_stall_torque(right_pwm, Speed_A);
-    left_pwm = apply_stall_torque(left_pwm, Speed_B);
-    Load(right_pwm, left_pwm);
-    pidMotorA.target = right_pwm;
-    pidMotorB.target = left_pwm;
-    pidMotorA.now = Speed_A;
-    pidMotorB.now = Speed_B;
+    command_line_motors(right_pwm, left_pwm);
 }
 
 void pid_init(pid_t *pid, uint32_t mode, float p, float i, float d)
@@ -99,9 +107,34 @@ void PID_Reset(pid_t *pid)
 
 void PID_LineControlReset(void)
 {
-    start_boost_ticks_remaining = START_BOOST_TICKS;
     corner_turn_active = false;
     corner_mark = IR_OUTER_NONE;
+    line_stop_armed = false;
+    line_stop_active = false;
+    line_stop_complete = false;
+    line_stop_confirm_ticks = 0U;
+    last_right_pwm = 0;
+    last_left_pwm = 0;
+    stop_right_pwm = 0;
+    stop_left_pwm = 0;
+}
+
+bool PID_LineStopIsComplete(void)
+{
+    return line_stop_complete;
+}
+
+bool PID_LineStopIsActive(void)
+{
+    return line_stop_active;
+}
+
+void PID_LineSetStopArmed(bool armed)
+{
+    line_stop_armed = armed;
+    if(!armed) {
+        line_stop_confirm_ticks = 0U;
+    }
 }
 
 void pid_control_line(float TargetLine, float TargetSpeed)
@@ -111,12 +144,44 @@ void pid_control_line(float TargetLine, float TargetSpeed)
     float line_error_abs;
     int base_pwm;
     int turn_pwm;
+    int turn_pwm_limit;
     int right_pwm;
     int left_pwm;
+    uint8_t black_count;
     ir_outer_direction_t outer_direction;
 
     line_now = getLine();
     raw_line_lost = IR_LineLost();
+    black_count = IR_GetBlackCount();
+
+    if(line_stop_armed && (black_count >= LINE_STOP_BLACK_COUNT)) {
+        if(line_stop_confirm_ticks < LINE_STOP_CONFIRM_TICKS) {
+            line_stop_confirm_ticks++;
+        }
+    } else {
+        line_stop_confirm_ticks = 0U;
+    }
+
+    if(!line_stop_active &&
+       (line_stop_confirm_ticks >= LINE_STOP_CONFIRM_TICKS)) {
+        line_stop_active = true;
+        line_stop_complete = false;
+        stop_right_pwm = last_right_pwm;
+        stop_left_pwm = last_left_pwm;
+        corner_turn_active = false;
+        corner_mark = IR_OUTER_NONE;
+        PID_Reset(&pidLine);
+    }
+
+    if(line_stop_active) {
+        stop_right_pwm = ramp_pwm_toward_zero(stop_right_pwm);
+        stop_left_pwm = ramp_pwm_toward_zero(stop_left_pwm);
+        command_line_motors(stop_right_pwm, stop_left_pwm);
+        if((stop_right_pwm == 0) && (stop_left_pwm == 0)) {
+            line_stop_complete = true;
+        }
+        return;
+    }
 
     if(corner_turn_active) {
         if(raw_line_lost) {
@@ -142,11 +207,7 @@ void pid_control_line(float TargetLine, float TargetSpeed)
             corner_turn_active = true;
             apply_corner_turn(TargetSpeed);
         } else {
-            Load(0, 0);
-            pidMotorA.target = 0;
-            pidMotorB.target = 0;
-            pidMotorA.now = Speed_A;
-            pidMotorB.now = Speed_B;
+            command_line_motors(0, 0);
         }
         return;
     }
@@ -157,47 +218,29 @@ void pid_control_line(float TargetLine, float TargetSpeed)
     PID_Limit(&pidLine);
 
     base_pwm = (int)(TargetSpeed * BASE_SPEED_TO_PWM);
-    base_pwm = clamp_int(base_pwm, MIN_RUN_PWM, MAX_DUTY);
-    turn_pwm = clamp_int((int)pidLine.out, -LINE_TURN_PWM_LIMIT, LINE_TURN_PWM_LIMIT);
+    base_pwm = clamp_int(base_pwm, 0, MAX_DUTY);
+    turn_pwm_limit = (base_pwm < LINE_TURN_PWM_LIMIT) ?
+                     base_pwm : LINE_TURN_PWM_LIMIT;
+    turn_pwm = clamp_int((int)pidLine.out,
+                         -turn_pwm_limit,
+                         turn_pwm_limit);
     line_error_abs = abs_float(pidLine.error[0]);
 
     if(line_error_abs >= LINE_EXTREME_ERROR_THRESHOLD) {
-        if(base_pwm > LINE_EXTREME_BASE_PWM) {
-            base_pwm = LINE_EXTREME_BASE_PWM;
-        }
         if(turn_pwm > 0) {
             turn_pwm += LINE_EXTREME_TURN_BOOST;
         } else if(turn_pwm < 0) {
             turn_pwm -= LINE_EXTREME_TURN_BOOST;
         }
         turn_pwm = clamp_int(turn_pwm,
-                             -LINE_TURN_PWM_LIMIT,
-                             LINE_TURN_PWM_LIMIT);
-    } else if(line_error_abs >= LINE_CURVE_ERROR_THRESHOLD) {
-        if(base_pwm > LINE_CURVE_BASE_PWM) {
-            base_pwm = LINE_CURVE_BASE_PWM;
-        }
-    }
-
-    /* Apply the launch floor after curve-speed limiting so it cannot be lost. */
-    if(start_boost_ticks_remaining > 0U) {
-        if(base_pwm < START_BOOST_PWM) {
-            base_pwm = START_BOOST_PWM;
-        }
-        start_boost_ticks_remaining--;
+                             -turn_pwm_limit,
+                             turn_pwm_limit);
     }
 
     /* Motor A is right wheel, motor B is left wheel. */
     right_pwm = clamp_int(base_pwm + turn_pwm, MIN_DUTY, MAX_DUTY);
     left_pwm = clamp_int(base_pwm - turn_pwm, MIN_DUTY, MAX_DUTY);
-    right_pwm = apply_stall_torque(right_pwm, Speed_A);
-    left_pwm = apply_stall_torque(left_pwm, Speed_B);
-    Load(right_pwm, left_pwm);
-
-    pidMotorA.target = right_pwm;
-    pidMotorB.target = left_pwm;
-    pidMotorA.now = Speed_A;
-    pidMotorB.now = Speed_B;
+    command_line_motors(right_pwm, left_pwm);
 }
 
 void pid_turn_only(void)

@@ -41,8 +41,9 @@
 #define HCSR04_AB_ALPHA                     (0.45f)
 #define HCSR04_AB_BETA                      (0.08f)
 #define HCSR04_AB_DEFAULT_DT_S              (0.15f)
-#define OLED_UPDATE_INTERVAL_MS             (100UL)
+#define OLED_UPDATE_INTERVAL_MS             (50UL)
 #define OLED_CONFIG_REPAIR_UPDATES          (50U)
+#define OLED_LINE_REPAIR_UPDATES            (3U)
 #define OLED_RX_TEXT_LEN                     (46U)
 
 #define GPIO_TEST_PORT                      GPIOB
@@ -434,12 +435,18 @@ static void OLED_ShowLineIfChanged(uint8_t y, uint8_t cache_index,
 {
     static char line_cache[4][17];
     static uint8_t refresh_age[4];
+    static uint8_t displayed_length[4];
     char padded[17];
     uint8_t i;
+    uint8_t text_length = 0U;
     bool changed = false;
 
     if(cache_index >= 4U || text == NULL) {
         return;
+    }
+
+    while((text_length < 16U) && (text[text_length] != '\0')) {
+        text_length++;
     }
 
     for(i = 0U; i < 16U; i++) {
@@ -462,12 +469,16 @@ static void OLED_ShowLineIfChanged(uint8_t y, uint8_t cache_index,
     }
 
     /* Periodically repair a line if an earlier software-I2C write was noisy. */
-    if(refresh_age[cache_index] >= 10U) {
+    if(refresh_age[cache_index] >= OLED_LINE_REPAIR_UPDATES) {
         changed = true;
     }
 
     if(changed) {
+        if(text_length < displayed_length[cache_index]) {
+            OLED_ClearLine16(y);
+        }
         OLED_ShowString16(y, padded);
+        displayed_length[cache_index] = text_length;
         refresh_age[cache_index] = 0U;
     } else {
         refresh_age[cache_index]++;
@@ -494,16 +505,22 @@ static void OLED_ShowStatus(void)
     FormatOdometer(line, sizeof(line), odometry.distance_center_mm);
     OLED_ShowLineIfChanged(2, 1U, line);
 
-    (void)snprintf(line, sizeof(line), "A:%05lu B:%05lu",
-                   (unsigned long)(odometry.travel_counts_a % 100000UL),
-                   (unsigned long)(odometry.travel_counts_b % 100000UL));
+    if(LineRunTimer_HasStarted()) {
+        unsigned long elapsed_ms = LineRunTimer_GetElapsedMs();
+        (void)snprintf(line, sizeof(line), "time:%lu.%03lus",
+                       elapsed_ms / 1000UL,
+                       elapsed_ms % 1000UL);
+    } else {
+        (void)snprintf(line, sizeof(line), "time:0.000s");
+    }
     OLED_ShowLineIfChanged(4, 2U, line);
 
     Bluetooth_GetRecentAscii(rx_text, sizeof(rx_text));
     if (rx_text[0] == '\0') {
-        (void)snprintf(line, sizeof(line), "CPR:%lu X%lu",
-                       (unsigned long)ENCODER_COUNTS_PER_WHEEL_REV,
-                       (unsigned long)ENCODER_DECODE_MULTIPLIER);
+        long speed_tenths = (long)(basespeed * 10.0f + 0.5f);
+        (void)snprintf(line, sizeof(line), "speed:%ld.%01ld",
+                       speed_tenths / 10L,
+                       speed_tenths % 10L);
         OLED_ShowLineIfChanged(6, 3U, line);
     } else {
         OLED_CopyAsciiLine(line, sizeof(line), rx_text, 0U, "RX:");
@@ -638,8 +655,8 @@ int main(void)
     DL_GPIO_clearPins(GPIO_LEDS_PORT, GPIO_LEDS_USER_LED_1_PIN);
     Load(0, 0);
 
-    basespeed = 10.0f;
-    TargetSpeed = basespeed;
+    basespeed = 10.8f;
+    TargetSpeed = 0.0f;
     TargetLine = 4.5f;
     Circle_Count = 1;
     turncount = 0;

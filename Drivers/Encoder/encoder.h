@@ -4,11 +4,11 @@
 #include <stdint.h>
 #include "ti_msp_dl_config.h"
 
-/* The current GPIO decoder counts one edge of encoder phase A. Use 2 for
- * both A edges or 4 after switching to full AB quadrature decoding. */
+/* Both edges of both quadrature phases are decoded: 13 lines become
+ * 52 counts per motor revolution before the 30:1 gearbox. */
 #define ENCODER_LINES_PER_MOTOR_REV       (13.0f)
 #define ENCODER_GEAR_RATIO                (30.0f)
-#define ENCODER_DECODE_MULTIPLIER         (1.0f)
+#define ENCODER_DECODE_MULTIPLIER         (4.0f)
 #define ENCODER_COUNTS_PER_WHEEL_REV      \
     (ENCODER_LINES_PER_MOTOR_REV * ENCODER_GEAR_RATIO * \
      ENCODER_DECODE_MULTIPLIER)
@@ -27,13 +27,24 @@ typedef struct {
     float distance_center_mm;
 } encoder_odometry_t;
 
-void ReadEncoder(GPIO_Regs *INVC_PORT, uint32_t INVC_PIN,
-                 GPIO_Regs *GPIO_PORT, uint32_t GPIO_PIN,
-                 volatile int *EncoderCount);
+typedef struct {
+    uint8_t previous_state;
+} encoder_quadrature_t;
+
+void Encoder_QuadratureInit(encoder_quadrature_t *decoder,
+                            GPIO_Regs *port,
+                            uint32_t phase_a_pin,
+                            uint32_t phase_b_pin);
+void Encoder_QuadratureUpdate(encoder_quadrature_t *decoder,
+                              GPIO_Regs *port,
+                              uint32_t phase_a_pin,
+                              uint32_t phase_b_pin,
+                              volatile int *encoder_count);
 int ReadSpeed(volatile int *EncoderCount);
 void Encoder_OdometryReset(void);
 void Encoder_OdometryUpdate(int16_t delta_a, int16_t delta_b);
 void Encoder_GetOdometry(encoder_odometry_t *odometry);
 float Encoder_CountsToMm(float counts);
+float Encoder_GetDistanceCenterMm(void);
 
 #endif

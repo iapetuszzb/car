@@ -259,6 +259,26 @@ void OLED_ShowString(uint8_t x,uint8_t y,uint8_t *chr,uint8_t sizey)
     }
 }
 
+void OLED_ClearLine16(uint8_t y)
+{
+    uint8_t page;
+    uint8_t commands[3];
+    static const uint8_t blank_page[128] = {0};
+
+    if(y > 6U) {
+        return;
+    }
+
+    for(page = 0U; page < 2U; page++) {
+        commands[0] = (uint8_t)(0xB0U + y + page);
+        commands[1] = (uint8_t)(0x10U |
+            ((OLED_COLUMN_OFFSET & 0xF0U) >> 4U));
+        commands[2] = (uint8_t)(OLED_COLUMN_OFFSET & 0x0FU);
+        OLED_WriteBuffer(0x00U, commands, 3U);
+        OLED_WriteBuffer(0x40U, blank_page, sizeof(blank_page));
+    }
+}
+
 void OLED_ShowString16(uint8_t y, const char *text)
 {
     uint8_t page;
@@ -307,7 +327,7 @@ void OLED_ShowString16(uint8_t y, const char *text)
 void OLED_RefreshConfig(void)
 {
     static const uint8_t commands[] = {
-        0xA0U, 0xC0U, 0xA6U, 0x20U, 0x02U, 0xAFU
+        0xA1U, 0xC8U, 0xA6U, 0x20U, 0x02U, 0xAFU
     };
 
     OLED_WriteBuffer(0x00U, commands, sizeof(commands));
@@ -356,8 +376,8 @@ void OLED_Init(void)
     OLED_WR_Byte(0x40,OLED_CMD);//--set start line address  Set Mapping RAM Display Start Line (0x00~0x3F)
     OLED_WR_Byte(0x81,OLED_CMD);//--set contrast control register
     OLED_WR_Byte(0xCF,OLED_CMD); // Set SEG Output Current Brightness
-    OLED_WR_Byte(0xA0,OLED_CMD);//--Set SEG/Column Mapping     0xa0左右反置 0xa1正常
-    OLED_WR_Byte(0xC0,OLED_CMD);//Set COM/Row Scan Direction   0xc0上下反置 0xc8正常
+    OLED_WR_Byte(0xA1,OLED_CMD);//--Set SEG/Column Mapping     0xa0左右反置 0xa1正常
+    OLED_WR_Byte(0xC8,OLED_CMD);//Set COM/Row Scan Direction   0xc0上下反置 0xc8正常
     OLED_WR_Byte(0xA6,OLED_CMD);//--set normal display
     OLED_WR_Byte(0xA8,OLED_CMD);//--set multiplex ratio(1 to 64)
     OLED_WR_Byte(0x3f,OLED_CMD);//--1/64 duty
